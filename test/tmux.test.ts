@@ -1,4 +1,4 @@
-import { test, after } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -11,11 +11,25 @@ import { TMUX_CONF, Tmux, TmuxError, TmuxNotFoundError } from "../src/tmux.ts";
 const execFileAsync = promisify(execFile);
 const RECORD_CHILD = fileURLToPath(new URL("./fixtures/tmux-record-child.ts", import.meta.url));
 const NOT_FOUND_MESSAGE = "tmux not found — install tmux ≥ 3.5";
+// macOS scans a freshly written executable on its first exec (measured 16–19 s under full-suite load).
+const SLOW_EXEC_MS = 60_000;
+// First line of every fresh test script: exit immediately when warmed up.
+const WARMUP_GUARD = '[ "$1" = --warmup ] && exit 0\n';
+
+/** Exec a freshly written script once so the timed run under test doesn't pay the first-exec scan. */
+function warmUpExecutable(file: string): void {
+  execFileSync(file, ["--warmup"], { stdio: "ignore", timeout: SLOW_EXEC_MS });
+}
 
 const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-tmux-test-"));
 process.env.PI_AGENTS_HOME = tmpRoot;
 const sockets: string[] = [];
 let socketCounter = 0;
+
+// The first tmux exec in a fresh test process is also slow under load (seconds), which can exceed Tmux.run's 10 s timeout.
+before(() => {
+  execFileSync("tmux", ["-V"], { stdio: "ignore", timeout: SLOW_EXEC_MS });
+});
 
 after(async () => {
   for (const socket of sockets) {
@@ -164,16 +178,19 @@ test("newSession passes argv and env to the child verbatim and honours -c, -x, -
   assert.equal(await tmuxOut(socket, ["display", "-p", "-t", "=verbatim-0001:", "#{window_width}x#{window_height}"]), "123x45");
 });
 
-test("newSession with a single argv element execs it directly, not through a shell", async () => {
+test("newSession with a single argv element execs it directly, not through a shell", { timeout: 3 * SLOW_EXEC_MS }, async () => {
   const { tmux, dir } = await makeTmux();
   await tmux.ensureConfig();
   const scriptDir = path.join(dir, `odd 'dir' "x" $HOME`);
   await fs.mkdir(scriptDir);
   const script = path.join(scriptDir, "tmux-child.sh");
-  await fs.writeFile(script, '#!/bin/sh\nprintf "%s|%s" "$0" "$#" > "$TMUX_RECORD_FILE"\nexec sleep 600\n', { mode: 0o755 });
+  await fs.writeFile(script, `#!/bin/sh\n${WARMUP_GUARD}printf "%s|%s" "$0" "$#" > "$TMUX_RECORD_FILE"\nexec sleep 600\n`, {
+    mode: 0o755,
+  });
+  warmUpExecutable(script);
   const record = path.join(dir, "rec.txt");
   await tmux.newSession({ name: "single-0001", cwd: dir, cols: 80, rows: 24, env: { TMUX_RECORD_FILE: record }, argv: [script] });
-  assert.equal(await waitForFile(record), `${script}|0`);
+  assert.equal(await waitForFile(record, SLOW_EXEC_MS), `${script}|0`);
 });
 
 test("the started server uses the written config", async () => {
@@ -231,16 +248,17 @@ test("killSession is ok when the server or session doesn't exist, and matches na
   assert.deepEqual(await tmux.liveSessions(), new Set(["exact-0001"]));
 });
 
-test("attachSync strips TMUX and TMUX_PANE from the child env without mutating process.env", async () => {
+test("attachSync strips TMUX and TMUX_PANE from the child env without mutating process.env", { timeout: 2 * SLOW_EXEC_MS }, async () => {
   const dir = await fs.mkdtemp(path.join(tmpRoot, "attach-"));
   const bin = path.join(dir, "fake-tmux");
   const argsOut = path.join(dir, "args.txt");
   const envOut = path.join(dir, "env.txt");
   await fs.writeFile(
     bin,
-    `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done > '${argsOut}'\nenv > '${envOut}'\nexit 7\n`,
+    `#!/bin/sh\n${WARMUP_GUARD}for a in "$@"; do printf '%s\\n' "$a"; done > '${argsOut}'\nenv > '${envOut}'\nexit 7\n`,
     { mode: 0o755 },
   );
+  warmUpExecutable(bin);
   const configPath = path.join(dir, "tmux.conf");
   const tmux = new Tmux({ configPath, socket: "pi-agents-test-fake", bin });
   const saved = { TMUX: process.env.TMUX, TMUX_PANE: process.env.TMUX_PANE, KEEP: process.env.PI_AGENTS_TEST_KEEP };
@@ -274,29 +292,34 @@ test("attachSync strips TMUX and TMUX_PANE from the child env without mutating p
   assert.match(env, /^PI_AGENTS_TEST_KEEP=kept value$/m);
 });
 
-test("liveSessions/killSession treat only a missing server as empty; other connection errors throw", async () => {
+test("liveSessions/killSession treat only a missing server as empty; other connection errors throw", { timeout: 2 * SLOW_EXEC_MS }, async () => {
   const dir = await fs.mkdtemp(path.join(tmpRoot, "connerr-"));
-  const fakeTmux = async (stderr: string) => {
-    const bin = path.join(dir, `fake-tmux-${Math.random().toString(16).slice(2)}`);
-    await fs.writeFile(bin, `#!/bin/sh\nprintf '%s\\n' '${stderr}' >&2\nexit 1\n`, { mode: 0o755 });
-    return new Tmux({ configPath: path.join(dir, "tmux.conf"), socket: "pi-agents-test-fake", bin });
-  };
-  for (const stderr of ["no server running on /tmp/tmux-1/x", "error connecting to /tmp/tmux-1/x (No such file or directory)"]) {
-    const tmux = await fakeTmux(stderr);
-    assert.deepEqual(await tmux.liveSessions(), new Set());
-    await tmux.killSession("x-0001");
+  // One fake bin printing $FAKE_TMUX_STDERR (inherited from process.env), so only one fresh executable needs warming.
+  const bin = path.join(dir, "fake-tmux");
+  await fs.writeFile(bin, `#!/bin/sh\n${WARMUP_GUARD}printf '%s\\n' "$FAKE_TMUX_STDERR" >&2\nexit 1\n`, { mode: 0o755 });
+  // Tmux.run's 10 s execFile timeout would otherwise fire during a slow first exec.
+  warmUpExecutable(bin);
+  const tmux = new Tmux({ configPath: path.join(dir, "tmux.conf"), socket: "pi-agents-test-fake", bin });
+  try {
+    for (const stderr of ["no server running on /tmp/tmux-1/x", "error connecting to /tmp/tmux-1/x (No such file or directory)"]) {
+      process.env.FAKE_TMUX_STDERR = stderr;
+      assert.deepEqual(await tmux.liveSessions(), new Set());
+      await tmux.killSession("x-0001");
+    }
+    process.env.FAKE_TMUX_STDERR = "error connecting to /tmp/tmux-1/x (Permission denied)";
+    await assert.rejects(tmux.liveSessions(), (err: unknown) => {
+      assert.ok(err instanceof TmuxError);
+      assert.equal(err.message, "tmux list-sessions failed: error connecting to /tmp/tmux-1/x (Permission denied)");
+      return true;
+    });
+    await assert.rejects(tmux.killSession("x-0001"), (err: unknown) => {
+      assert.ok(err instanceof TmuxError);
+      assert.equal(err.cmd, "kill-session");
+      return true;
+    });
+  } finally {
+    delete process.env.FAKE_TMUX_STDERR;
   }
-  const denied = await fakeTmux("error connecting to /tmp/tmux-1/x (Permission denied)");
-  await assert.rejects(denied.liveSessions(), (err: unknown) => {
-    assert.ok(err instanceof TmuxError);
-    assert.equal(err.message, "tmux list-sessions failed: error connecting to /tmp/tmux-1/x (Permission denied)");
-    return true;
-  });
-  await assert.rejects(denied.killSession("x-0001"), (err: unknown) => {
-    assert.ok(err instanceof TmuxError);
-    assert.equal(err.cmd, "kill-session");
-    return true;
-  });
 });
 
 test("a missing tmux binary gives TmuxNotFoundError with the spec §10 message from every method", async () => {
