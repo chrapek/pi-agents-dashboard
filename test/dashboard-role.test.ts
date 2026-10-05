@@ -15,6 +15,9 @@ import { EMPTY_HINT } from "../src/ui/view.ts";
 import {
   DASHBOARD_OVERLAY_OPTIONS,
   NEEDS_TUI_MESSAGE,
+  displayPath,
+  modelArgs,
+  modelLabel,
   registerDashboardRole,
   type DashboardRoleDeps,
 } from "../src/dashboard-role.ts";
@@ -49,6 +52,7 @@ function fakePi(flags: Record<string, boolean | string | undefined> = {}) {
     getFlag(name: string) {
       return flags[name];
     },
+    getThinkingLevel: () => "high",
   };
   async function emit(type: string, event: Record<string, unknown>, ctx: unknown): Promise<void> {
     for (const h of handlers.get(type) ?? []) await h({ type, ...event }, ctx);
@@ -130,6 +134,7 @@ function fakeDeps(log: string[], attach: (id: string) => { status: number | null
   const service = {} as DashboardService;
   const deps: DashboardRoleDeps = {
     service,
+    gitInfo: async () => ({ branch: null, inRepo: false }),
     tmux: {
       attachSync(id: string) {
         log.push(`attach:${id}`);
@@ -184,12 +189,42 @@ test("/agents opens the dashboard as a full-screen overlay via ctx.ui.custom", a
   assert.deepEqual(log.slice(1), ["render"]);
 });
 
+test("the dashboard header shows the launch dir, its branch and the model new agents inherit", async () => {
+  const { pi, commands } = fakePi();
+  const { ctx, log } = fakeCtx({ results: [{ type: "close" }] });
+  const { deps, created } = fakeDeps(log);
+  deps.gitInfo = async (cwd) => (cwd === os.homedir() + "/www/app" ? { branch: "main", inRepo: true } : { branch: null, inRepo: false });
+  registerDashboardRole(pi, deps);
+  const c = ctx as unknown as { cwd: string; model?: { provider: string; id: string } };
+  c.cwd = os.homedir() + "/www/app";
+  c.model = { provider: "anthropic", id: "claude-opus-5-5" };
+  await commands.get("agents")!.handler("", ctx);
+  assert.deepEqual(created[0]!.context, { cwd: "~/www/app", branch: "main", inRepo: true, modelLabel: "claude-opus-5-5 (high)" });
+});
+
+test("displayPath, modelLabel and modelArgs", () => {
+  assert.equal(displayPath("/home/me", "/home/me"), "~");
+  assert.equal(displayPath("/home/me/www/x", "/home/me"), "~/www/x");
+  assert.equal(displayPath("/home/meow/x", "/home/me"), "/home/meow/x");
+  assert.equal(modelLabel(null), null);
+  assert.equal(modelLabel({ provider: "p", id: "m", thinking: "off" }), "m");
+  assert.equal(modelLabel({ provider: "p", id: "m", thinking: "high" }), "m (high)");
+  assert.deepEqual(modelArgs(null), []);
+  assert.deepEqual(modelArgs({ provider: "anthropic", id: "claude-opus-5-5", thinking: "high" }), [
+    "--model",
+    "anthropic/claude-opus-5-5",
+    "--thinking",
+    "high",
+  ]);
+});
+
 test("the overlay component pads the dashboard to the full terminal height and forwards input/focus/dispose", async () => {
   const { pi, commands } = fakePi();
   const { ctx, state, log } = fakeCtx();
   const inner = { focused: false, inputs: [] as string[], disposed: 0, invalidated: 0 };
   const deps: DashboardRoleDeps = {
     service: {} as DashboardService,
+    gitInfo: async () => ({ branch: null, inRepo: false }),
     tmux: { attachSync: () => ({ status: 0 }) } as unknown as Tmux,
     createDashboard: () => ({
       get focused() {
@@ -459,7 +494,11 @@ test("smoke: /agents opens an empty full-screen dashboard backed by the real ser
   sockets.push(socket);
   const { pi, commands } = fakePi();
   const { ctx, state, log } = fakeCtx();
-  registerDashboardRole(pi, { home, tmux: new Tmux({ configPath: path.join(home, "tmux.conf"), socket }) });
+  registerDashboardRole(pi, {
+    home,
+    tmux: new Tmux({ configPath: path.join(home, "tmux.conf"), socket }),
+    gitInfo: async () => ({ branch: null, inRepo: false }),
+  });
   const opened = commands.get("agents")!.handler("", ctx);
   await settle();
   const call = state.customCalls[0]!;

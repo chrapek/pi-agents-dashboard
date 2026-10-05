@@ -3,12 +3,15 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import type { Component, Focusable, OverlayOptions } from "@earendil-works/pi-tui";
+import { homedir } from "node:os";
+import { currentBranch, repoRoot } from "./git.ts";
 import { resolveHome, tmuxConfPath } from "./paths.ts";
 import { AgentService } from "./service.ts";
 import { Tmux } from "./tmux.ts";
 import { Dashboard } from "./ui/dashboard.ts";
 import type { DashboardOptions } from "./ui/dashboard.ts";
 import type { DashboardResult, DashboardService } from "./ui/service-types.ts";
+import type { HeaderContext } from "./ui/view.ts";
 
 export const NEEDS_TUI_MESSAGE = "The agent dashboard needs the interactive TUI";
 
@@ -30,6 +33,13 @@ export interface DashboardRoleDeps {
   /** Default: `AgentService` on `home` sharing `tmux`. */
   service?: DashboardService;
   createDashboard?: (opts: DashboardOptions) => DashboardComponent;
+  /** Branch and repo membership of the launch dir; default asks git. */
+  gitInfo?: (cwd: string) => Promise<{ branch: string | null; inRepo: boolean }>;
+}
+
+async function defaultGitInfo(cwd: string): Promise<{ branch: string | null; inRepo: boolean }> {
+  const [branch, root] = await Promise.all([currentBranch(cwd), repoRoot(cwd)]);
+  return { branch, inRepo: root !== null };
 }
 
 /** Pads the dashboard to the terminal height so the full-screen overlay hides the chat behind it. */
@@ -69,6 +79,27 @@ class FullScreen implements Component, Focusable {
   }
 }
 
+/** `~/x` for paths under the home directory. */
+export function displayPath(p: string, home: string = homedir()): string {
+  if (p === home) return "~";
+  return p.startsWith(home + "/") ? "~" + p.slice(home.length) : p;
+}
+
+/** The dashboard's model and thinking level, which new agents inherit. */
+export interface ModelChoice {
+  provider: string;
+  id: string;
+  thinking: string;
+}
+
+export function modelLabel(m: ModelChoice | null): string | null {
+  return m === null ? null : m.thinking === "off" ? m.id : `${m.id} (${m.thinking})`;
+}
+
+export function modelArgs(m: ModelChoice | null): string[] {
+  return m === null ? [] : ["--model", `${m.provider}/${m.id}`, "--thinking", m.thinking];
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -79,13 +110,14 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
   let open = false; // single instance: the dashboard or an attach is on screen
   let uiPromptOpen = false;
   let unsubscribeInput: (() => void) | undefined;
+  let model: ModelChoice | null = null; // captured when the dashboard opens; read by every dispatch
 
   /** Built on first open, so loading the extension never touches the store or tmux. */
   function getWiring(): { service: DashboardService; tmux: Tmux } {
     if (!wiring) {
       const home = deps.home ?? resolveHome();
       const tmux = deps.tmux ?? new Tmux({ configPath: tmuxConfPath(home) });
-      const service: DashboardService = deps.service ?? new AgentService({ home, tmux });
+      const service: DashboardService = deps.service ?? new AgentService({ home, tmux, modelArgs: () => modelArgs(model) });
       wiring = { service, tmux };
     }
     return wiring;
@@ -105,8 +137,15 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
     });
   }
 
+  async function headerContext(ctx: ExtensionContext): Promise<HeaderContext> {
+    const { branch, inRepo } = await (deps.gitInfo ?? defaultGitInfo)(ctx.cwd);
+    return { cwd: displayPath(ctx.cwd), branch, inRepo, modelLabel: modelLabel(model) };
+  }
+
   async function runDashboard(ctx: ExtensionContext): Promise<void> {
     const { service, tmux } = getWiring();
+    model = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id, thinking: pi.getThinkingLevel() } : null;
+    const context = await headerContext(ctx);
     let selected: string | undefined;
     while (true) {
       const initialSelectedId = selected;
@@ -116,6 +155,7 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
           const dashboard = createDashboard({
             service,
             launchCwd: ctx.cwd,
+            context,
             theme,
             done,
             requestRender: () => tui.requestRender(),

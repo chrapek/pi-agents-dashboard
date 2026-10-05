@@ -83,7 +83,9 @@ Inside an attached agent:
 
 Detaching never interrupts a running turn. Attaching to a stopped agent resumes the same conversation.
 
-Row states: `●` Needs input, `✽` Working, `✓` Done, `✗` Failed, `∙` Stopped (its tmux session is gone).
+Row states: `◆` Needs input, `✽` Working, `◇` Done, `✗` Failed, `∙` Stopped (its tmux session is gone).
+
+New agents start with the model and thinking level the dashboard's Pi is using (shown under the input box).
 
 ## Storage
 

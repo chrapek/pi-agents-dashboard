@@ -124,10 +124,8 @@ export function sortRows(rows: Row[]): Row[] {
 
 /** Floor to the largest unit: "45s", "12m", "3h", "2d". Negative or non-finite → "0s". */
 export function formatAge(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "0s";
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
+  if (!Number.isFinite(ms) || ms < 60_000) return "just now";
+  const m = Math.floor(ms / 60_000);
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h`;

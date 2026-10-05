@@ -101,6 +101,14 @@ export async function repoRoot(cwd: string): Promise<string | null> {
   return root === "" ? null : root;
 }
 
+/** The branch checked out in `cwd` (also an unborn one); null outside a repo or on a detached HEAD. */
+export async function currentBranch(cwd: string): Promise<string | null> {
+  const result = await runGit(["-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (!result.ok) return null;
+  const branch = result.stdout.trim();
+  return branch === "" ? null : branch;
+}
+
 /** Absolute paths of the worktrees registered in `repoRoot` (empty when listing fails). */
 async function registeredWorktrees(repoRoot: string): Promise<Set<string>> {
   const result = await runGit(["-C", repoRoot, "worktree", "list", "--porcelain"]);

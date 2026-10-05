@@ -8,13 +8,14 @@ import { sortRows } from "../state.ts";
 import type { Row } from "../state.ts";
 import type { DashboardResult, DashboardService } from "./service-types.ts";
 import { DISPATCH_PLACEHOLDER, renderDashboard } from "./view.ts";
-import type { DashboardView, InputLineModel, MessageTone, Paint } from "./view.ts";
+import type { DashboardView, HeaderContext, InputLineModel, MessageTone, Paint } from "./view.ts";
 
-export type ThemeLike = Pick<Theme, "fg" | "bold">;
+export type ThemeLike = Pick<Theme, "fg" | "bg" | "bold">;
 
 export interface DashboardOptions {
   service: DashboardService;
   launchCwd: string; // passed to dispatch
+  context: HeaderContext; // title bar and input box label
   theme: ThemeLike;
   done: (r: DashboardResult) => void; // from ctx.ui.custom
   requestRender: () => void; // tui.requestRender
@@ -48,6 +49,7 @@ function dirtyMessage(path: string): string {
 export class Dashboard implements Component, Focusable {
   private readonly service: DashboardService;
   private readonly launchCwd: string;
+  private readonly context: HeaderContext;
   private readonly theme: ThemeLike;
   private readonly done: (r: DashboardResult) => void;
   private readonly requestRender: () => void;
@@ -72,7 +74,8 @@ export class Dashboard implements Component, Focusable {
   private timer: ReturnType<typeof setInterval> | null;
   private hasFocus = false;
 
-  private readonly paint: Paint = (role, text) => (role === "bold" ? this.theme.bold(text) : this.theme.fg(role, text));
+  private readonly paint: Paint = (role, text) =>
+    role === "bold" ? this.theme.bold(text) : role === "selected" ? this.theme.bg("selectedBg", text) : this.theme.fg(role, text);
   private readonly dispatchInput = new Input({
     prompt: "",
     placeholder: DISPATCH_PLACEHOLDER,
@@ -83,6 +86,7 @@ export class Dashboard implements Component, Focusable {
   constructor(opts: DashboardOptions) {
     this.service = opts.service;
     this.launchCwd = opts.launchCwd;
+    this.context = opts.context;
     this.theme = opts.theme;
     this.done = opts.done;
     this.requestRender = opts.requestRender;
@@ -436,6 +440,7 @@ export class Dashboard implements Component, Focusable {
         : null,
       message: this.message,
       input: this.inputModel(this.dispatchInput, DISPATCH_PLACEHOLDER, !peek),
+      context: this.context,
     };
   }
 }

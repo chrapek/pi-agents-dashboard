@@ -27,6 +27,8 @@ export interface AgentServiceOptions {
   size?: () => { cols: number; rows: number }; // default process.stdout size, fallback 120x40
   now?: () => number; // default Date.now
   randHex?: () => string; // passed to makeId
+  /** Extra argv for a new session, e.g. `--model p/id --thinking high`; read at each dispatch. Default none. */
+  modelArgs?: () => string[];
 }
 
 // Attempts at finding an id whose agent dir and tmux session are both free.
@@ -89,6 +91,7 @@ export class AgentService implements DashboardService {
   private readonly size: () => { cols: number; rows: number };
   private readonly now: () => number;
   private readonly randHex: (() => string) | undefined;
+  private readonly modelArgs: () => string[];
 
   constructor(opts: AgentServiceOptions) {
     this.home = opts.home;
@@ -97,6 +100,7 @@ export class AgentService implements DashboardService {
     this.size = opts.size ?? defaultSize;
     this.now = opts.now ?? Date.now;
     this.randHex = opts.randHex;
+    this.modelArgs = opts.modelArgs ?? (() => []);
   }
 
   async snapshot(): Promise<Row[]> {
@@ -261,7 +265,7 @@ export class AgentService implements DashboardService {
 
   /** Spec §4 step 4 command. */
   private dispatchArgv(meta: AgentMeta): string[] {
-    return [this.piBin, "--tui-mode", "fullscreen", "--name", meta.name, "--", meta.prompt];
+    return [this.piBin, "--tui-mode", "fullscreen", ...this.modelArgs(), "--name", meta.name, "--", meta.prompt];
   }
 
   /** Spec §7 resume command (a reply is appended as `-- <text>`). */

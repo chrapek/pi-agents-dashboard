@@ -7,7 +7,16 @@ import { TmuxNotFoundError } from "../../src/tmux.ts";
 import { Dashboard } from "../../src/ui/dashboard.ts";
 import type { DashboardOptions } from "../../src/ui/dashboard.ts";
 import type { DashboardResult, DashboardService } from "../../src/ui/service-types.ts";
-import { SPINNER_FRAMES, LIST_FOOTER, PEEK_FOOTER, EMPTY_HINT } from "../../src/ui/view.ts";
+import { SPINNER_FRAMES, EMPTY_HINT, LIST_HINTS_EMPTY, PEEK_HINTS, hintsText } from "../../src/ui/view.ts";
+import type { HeaderContext } from "../../src/ui/view.ts";
+
+const LIST_FOOTER = hintsText(LIST_HINTS_EMPTY);
+const PEEK_FOOTER = hintsText(PEEK_HINTS);
+const CONTEXT: HeaderContext = { cwd: "~/repo", branch: "main", inRepo: true, modelLabel: "model-x (high)" };
+/** Content of a `│ … │` box line. */
+const boxText = (l: string): string => l.slice(2, -2).trimEnd();
+/** Index of the peek box top border (`╭─ <header> ─…╮`), -1 when peek is closed. */
+const peekTop = (lines: string[]): number => lines.findIndex((l) => l.startsWith("╭─ "));
 
 // Real key sequences as delivered by the terminal.
 const KEY = {
@@ -131,7 +140,7 @@ class FakeService implements DashboardService {
   }
 }
 
-const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
 
 /** Lets every already-resolved promise chain run to completion. */
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -157,6 +166,7 @@ async function setup(rows: Row[], opts: Partial<DashboardOptions> = {}, svc = ne
   const d = new Dashboard({
     service: svc,
     launchCwd: "/repo/sub",
+    context: CONTEXT,
     theme,
     done: (r) => results.push(r),
     requestRender: () => renders++,
@@ -184,18 +194,19 @@ async function setup(rows: Row[], opts: Partial<DashboardOptions> = {}, svc = ne
       await settle();
     },
     screen,
+    // Title line of the selected row: `▌<icon> <Display name>  worktree …   <age>`.
     selected: () =>
       lines()
-        .map((l) => l.trimStart())
-        .find((l) => l.startsWith("▸ "))
-        ?.replace(/^▸ . /, "")
+        .find((l) => l.startsWith("▌"))
+        ?.replace(/^▌. /, "")
         .split("  ")[0],
+    // The message line sits right above the box(es) at the bottom.
     message: () => {
       const ls = lines();
-      const sep = ls.lastIndexOf("─".repeat(99));
-      const above = ls[sep - 1];
+      const firstBox = ls.findIndex((l) => l.startsWith("╭"));
+      const above = ls[firstBox - 1];
       const isOther =
-        above === undefined || above === "" || above === EMPTY_HINT || above.startsWith("reply › ") || /^[ ▸] /.test(above);
+        above === undefined || above === "" || above === EMPTY_HINT || /^[ ▌▾]/.test(above);
       return isOther ? undefined : above;
     },
   };
@@ -209,7 +220,7 @@ async function typeText(h: Harness, text: string) {
 }
 
 function inputValue(h: Harness): string {
-  return h.screen().find((l) => l.startsWith("› "))!.slice(2);
+  return boxText(h.screen().find((l) => l.startsWith("│ ❯ "))!).slice(2);
 }
 
 // --- refresh & selection ---
@@ -217,24 +228,24 @@ function inputValue(h: Harness): string {
 test("initial refresh shows the rows and selects the first row", async () => {
   const h = await setup(three());
   assert.ok(h.svc.count("snapshot") >= 1);
-  assert.equal(h.selected(), "agent a");
+  assert.equal(h.selected(), "Agent a");
   assert.ok(h.renders() > 0);
   h.d.dispose();
 });
 
 test("initialSelectedId selects that row", async () => {
   const h = await setup(three(), { initialSelectedId: "c" });
-  assert.equal(h.selected(), "agent c");
+  assert.equal(h.selected(), "Agent c");
   h.d.dispose();
 });
 
 test("refresh keeps the selection by id when rows reorder", async () => {
   const h = await setup(three());
   await h.press(KEY.down);
-  assert.equal(h.selected(), "agent b");
+  assert.equal(h.selected(), "Agent b");
   h.svc.rows = [row("x"), row("c"), row("b"), row("a")];
   await h.d.refresh();
-  assert.equal(h.selected(), "agent b");
+  assert.equal(h.selected(), "Agent b");
   h.d.dispose();
 });
 
@@ -242,22 +253,22 @@ test("refresh falls back to the nearest index when the selected row disappears",
   const h = await setup(three());
   await h.press(KEY.down);
   await h.press(KEY.down);
-  assert.equal(h.selected(), "agent c");
+  assert.equal(h.selected(), "Agent c");
   h.svc.rows = [row("a"), row("b")];
   await h.d.refresh();
-  assert.equal(h.selected(), "agent b");
+  assert.equal(h.selected(), "Agent b");
   h.svc.rows = [];
   await h.d.refresh();
   assert.equal(h.selected(), undefined);
   h.svc.rows = [row("z")];
   await h.d.refresh();
-  assert.equal(h.selected(), "agent z");
+  assert.equal(h.selected(), "Agent z");
   h.d.dispose();
 });
 
 test("spinner advances one frame per refresh", async () => {
   const h = await setup([row("w", { state: "working" })]);
-  const icon = () => h.screen().find((l) => l.includes("agent w"))!.slice(4, 5);
+  const icon = () => h.screen().find((l) => l.includes("Agent w"))!.slice(1, 2);
   const first = SPINNER_FRAMES.indexOf(icon());
   assert.ok(first >= 0);
   for (let i = 1; i <= 5; i++) {
@@ -304,6 +315,7 @@ test("the constructor starts the first refresh and an unref'd timer; dispose and
       const d = new Dashboard({
         service: svc,
         launchCwd: "/repo",
+        context: CONTEXT,
         theme,
         done: () => {},
         requestRender: () => {},
@@ -347,7 +359,7 @@ test("snapshot errors surface on the message line without crashing", async () =>
   assert.equal(h.message(), "tmux list-sessions failed: boom");
   svc.snapshotError = null;
   await h.d.refresh();
-  assert.equal(h.selected(), "agent a");
+  assert.equal(h.selected(), "Agent a");
   h.d.dispose();
 });
 
@@ -367,15 +379,15 @@ test("render fits width and height", async () => {
 test("↓ and ↑ move the selection and stop at the ends", async () => {
   const h = await setup(three());
   await h.press(KEY.down);
-  assert.equal(h.selected(), "agent b");
+  assert.equal(h.selected(), "Agent b");
   await h.press(KEY.down);
   await h.press(KEY.down);
-  assert.equal(h.selected(), "agent c");
+  assert.equal(h.selected(), "Agent c");
   await h.press(KEY.up);
-  assert.equal(h.selected(), "agent b");
+  assert.equal(h.selected(), "Agent b");
   await h.press(KEY.up);
   await h.press(KEY.up);
-  assert.equal(h.selected(), "agent a");
+  assert.equal(h.selected(), "Agent a");
   h.d.dispose();
 });
 
@@ -404,9 +416,9 @@ test("Enter with text dispatches, clears the input, selects the new row", async 
   await typeText(h, "  add a rate limiter  ");
   await h.press(KEY.enter);
   assert.deepEqual(h.svc.only("dispatch"), [["dispatch", "add a rate limiter", "/repo/sub"]]);
-  assert.equal(h.selected(), "new agent");
+  assert.equal(h.selected(), "New agent");
   assert.equal(h.message(), "Dispatched new agent");
-  assert.ok(inputValue(h).startsWith("Describe a task"));
+  assert.ok(inputValue(h).startsWith("Dispatch a new agent"));
   assert.deepEqual(h.results, []);
   h.d.dispose();
 });
@@ -539,11 +551,11 @@ test("Space with empty input opens peek for the selected row", async () => {
   await h.press(KEY.space);
   assert.deepEqual(h.svc.only("peek"), [["peek", "b"]]);
   const lines = h.screen();
-  const sep = lines.findIndex((l) => l.startsWith("── peek "));
-  assert.ok(sep > 0);
-  assert.equal(lines[sep + 1], "agent b · my-app · pi-agents/b · done · model-x");
-  assert.equal(lines[sep + 3], "output of b");
-  assert.ok(lines.some((l) => l.startsWith("reply › ")));
+  const top = peekTop(lines);
+  assert.ok(top > 0);
+  assert.ok(lines[top]!.startsWith("╭─ Agent b · my-app · pi-agents/b · done · model-x ─"), lines[top]);
+  assert.equal(boxText(lines[top + 1]!), "output of b");
+  assert.ok(lines.some((l) => l.startsWith("│ reply ❯ ")));
   assert.equal(lines.at(-1), PEEK_FOOTER);
   h.d.dispose();
 });
@@ -563,7 +575,7 @@ test("Esc with text clears the input", async () => {
   await typeText(h, "draft");
   await h.press(KEY.esc);
   assert.deepEqual(h.results, []);
-  assert.ok(inputValue(h).startsWith("Describe a task"));
+  assert.ok(inputValue(h).startsWith("Dispatch a new agent"));
   h.d.dispose();
 });
 
@@ -754,18 +766,19 @@ async function openPeek(h: Harness) {
 
 function peekHeader(h: Harness): string | undefined {
   const lines = h.screen();
-  return lines[lines.findIndex((l) => l.startsWith("── peek ")) + 1];
+  const top = peekTop(lines);
+  return top < 0 ? undefined : lines[top]!.replace(/^╭─ /, "").replace(/ ─+╮$/, "");
 }
 
 test("peek: ↓/↑ move the selection and the peek follows", async () => {
   const h = await setup(three());
   await openPeek(h);
   await h.press(KEY.down);
-  assert.equal(h.selected(), "agent b");
-  assert.ok(peekHeader(h)!.startsWith("agent b · "));
+  assert.equal(h.selected(), "Agent b");
+  assert.ok(peekHeader(h)!.startsWith("Agent b · "));
   await h.press(KEY.down);
   await h.press(KEY.up);
-  assert.ok(peekHeader(h)!.startsWith("agent b · "));
+  assert.ok(peekHeader(h)!.startsWith("Agent b · "));
   assert.deepEqual(h.svc.only("peek").map((c) => c[1]), ["a", "b", "c", "b"]);
   h.d.dispose();
 });
@@ -775,7 +788,7 @@ test("peek: refresh re-reads the peeked agent", async () => {
   await openPeek(h);
   h.svc.lastText.a = "fresh output";
   await h.d.refresh();
-  assert.ok(h.screen().includes("fresh output"));
+  assert.ok(h.screen().some((l) => l.startsWith("│ ") && boxText(l) === "fresh output"));
   h.d.dispose();
 });
 
@@ -786,7 +799,7 @@ test("peek: Enter sends a non-empty reply and clears the reply input", async () 
   await h.press(KEY.enter);
   assert.deepEqual(h.svc.only("reply"), [["reply", "a", "yes, update it"]]);
   assert.equal(h.message(), "Reply sent");
-  assert.ok(h.screen().some((l) => l.trimEnd() === "reply ›"));
+  assert.ok(h.screen().some((l) => l.startsWith("│ ") && boxText(l) === "reply ❯"));
   assert.equal(h.svc.count("dispatch"), 0);
   h.d.dispose();
 });
@@ -807,7 +820,7 @@ test("peek: text typed while a reply is in flight is kept", async () => {
   await settle();
   assert.deepEqual(h.svc.only("reply"), [["reply", "a", "yes"]]);
   assert.equal(h.message(), "Reply sent");
-  assert.ok(h.screen().some((l) => l.trimEnd() === "reply › yes and more"));
+  assert.ok(h.screen().some((l) => l.startsWith("│ ") && boxText(l) === "reply ❯ yes and more"));
   h.d.dispose();
 });
 
@@ -816,7 +829,7 @@ test("peek: moving the selection clears the reply draft", async () => {
   await openPeek(h);
   await typeText(h, "meant for a");
   await h.press(KEY.down);
-  assert.ok(h.screen().some((l) => l.trimEnd() === "reply ›"));
+  assert.ok(h.screen().some((l) => l.startsWith("│ ") && boxText(l) === "reply ❯"));
   await h.press(KEY.enter);
   assert.equal(h.svc.count("reply"), 0);
   h.d.dispose();
@@ -832,7 +845,7 @@ test("peek: shows Loading… until the first peek for the selected row resolves"
   };
   const body = () => {
     const lines = h.screen();
-    return lines[lines.findIndex((l) => l.startsWith("── peek ")) + 3];
+    return boxText(lines[peekTop(lines) + 1]!);
   };
   await openPeek(h);
   assert.equal(body(), "Loading…");
@@ -852,7 +865,7 @@ test("peek: an agent without output shows No output yet once loaded", async () =
   h.svc.lastText.a = "";
   await openPeek(h);
   const lines = h.screen();
-  assert.equal(lines[lines.findIndex((l) => l.startsWith("── peek ")) + 3], "No output yet");
+  assert.equal(boxText(lines[peekTop(lines) + 1]!), "No output yet");
   h.d.dispose();
 });
 
@@ -884,7 +897,7 @@ test("peek: reply errors surface and keep the reply text", async () => {
   await typeText(h, "hello");
   await h.press(KEY.enter);
   assert.equal(h.message(), "reply failed: agent gone");
-  assert.ok(h.screen().some((l) => l.trimEnd() === "reply › hello"));
+  assert.ok(h.screen().some((l) => l.startsWith("│ ") && boxText(l) === "reply ❯ hello"));
   h.d.dispose();
 });
 
@@ -911,7 +924,7 @@ test("peek: Esc closes the peek, not the dashboard", async () => {
   await h.press(KEY.esc);
   assert.deepEqual(h.results, []);
   const lines = h.screen();
-  assert.ok(!lines.some((l) => l.startsWith("── peek ")));
+  assert.equal(peekTop(lines), -1);
   assert.equal(lines.at(-1), LIST_FOOTER);
   h.d.dispose();
 });
@@ -930,9 +943,9 @@ test("focused is propagated to the input that has focus", async () => {
   const h = await setup(three());
   h.d.focused = true;
   const markerLine = () => h.d.render(100).find((l) => l.includes(CURSOR_MARKER));
-  assert.ok(strip(markerLine()!).trimStart().startsWith("› "));
+  assert.ok(strip(markerLine()!).includes("│ ❯ "));
   await openPeek(h);
-  assert.ok(strip(markerLine()!).trimStart().startsWith("reply › "));
+  assert.ok(strip(markerLine()!).includes("│ reply ❯ "));
   h.d.focused = false;
   assert.equal(markerLine(), undefined);
   h.d.dispose();

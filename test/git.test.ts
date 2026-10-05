@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+  currentBranch,
   GitError,
   repoRoot,
   createWorktree,
@@ -138,6 +139,20 @@ test("repoRoot works in a repo with no commits", async () => {
 test("repoRoot of a non-repo directory is null", async () => {
   const dir = await newDir("plain");
   assert.equal(await repoRoot(dir), null);
+});
+
+test("currentBranch names the checked-out branch, null outside a repo or on a detached HEAD", async () => {
+  const repo = await repoWithCommit();
+  await git(repo, "checkout", "-q", "-b", "feature/x");
+  assert.equal(await currentBranch(path.join(repo)), "feature/x");
+  await git(repo, "checkout", "-q", "--detach");
+  assert.equal(await currentBranch(repo), null);
+  assert.equal(await currentBranch(await newDir("plain")), null);
+});
+
+test("currentBranch of a repo with no commits names its unborn branch", async () => {
+  const repo = await emptyRepo();
+  assert.match((await currentBranch(repo)) ?? "", /^(main|master)$/);
 });
 
 test("repoRoot of a missing directory is null", async () => {

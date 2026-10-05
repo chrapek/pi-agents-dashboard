@@ -280,6 +280,15 @@ test("piBin defaults to env.PI_AGENTS_PI_BIN", async () => {
   assert.deepEqual((await f.record(meta.id)).argv, ["--tui-mode", "fullscreen", "--name", "from env", "--", "from env"]);
 });
 
+test("dispatch passes modelArgs before --name", async () => {
+  const f = await fixture({ randHex: () => "c0de", modelArgs: () => ["--model", "anthropic/claude-opus-5-5", "--thinking", "high"] });
+  const meta = await f.service.dispatch("pick a model", await newDir("plain"));
+  assert.deepEqual((await f.record(meta.id)).argv, [
+    "--tui-mode", "fullscreen", "--model", "anthropic/claude-opus-5-5", "--thinking", "high",
+    "--name", "pick a model", "--", "pick a model",
+  ]);
+});
+
 test("dispatch rejects an empty or whitespace-only prompt without creating anything", async () => {
   const f = await fixture();
   const launchCwd = await newDir("plain");

@@ -339,11 +339,11 @@ test("sortRows of empty list is empty", () => {
 
 // --- formatAge ---
 
-test("formatAge uses s, m, h, d with floor", () => {
-  assert.equal(formatAge(0), "0s");
-  assert.equal(formatAge(999), "0s");
-  assert.equal(formatAge(45_000), "45s");
-  assert.equal(formatAge(59_999), "59s");
+test("formatAge: under a minute is `just now`, then m, h, d with floor", () => {
+  assert.equal(formatAge(0), "just now");
+  assert.equal(formatAge(999), "just now");
+  assert.equal(formatAge(45_000), "just now");
+  assert.equal(formatAge(59_999), "just now");
   assert.equal(formatAge(60_000), "1m");
   assert.equal(formatAge(12 * 60_000 + 59_000), "12m");
   assert.equal(formatAge(3_600_000 - 1), "59m");
@@ -355,13 +355,14 @@ test("formatAge uses s, m, h, d with floor", () => {
   assert.equal(formatAge(2 * 86_400_000 + 5_000), "2d");
 });
 
-test("formatAge of negative or non-finite is '0s'", () => {
-  assert.equal(formatAge(-5_000), "0s");
-  assert.equal(formatAge(Number.NaN), "0s");
+test("formatAge of negative or non-finite is `just now`", () => {
+  assert.equal(formatAge(-5_000), "just now");
+  assert.equal(formatAge(Number.NaN), "just now");
 });
 
-test("deriveRow age is now - createdAt, clock skew shows 0s", () => {
-  assert.equal(deriveRow(meta({ createdAt: NOW - 45_000 }), null, true, NOW).age, "45s");
+test("deriveRow age is now - createdAt, clock skew shows `just now`", () => {
+  assert.equal(deriveRow(meta({ createdAt: NOW - 45_000 }), null, true, NOW).age, "just now");
+  assert.equal(deriveRow(meta({ createdAt: NOW - 12 * 60_000 }), null, true, NOW).age, "12m");
   assert.equal(deriveRow(meta({ createdAt: NOW - 3 * 3_600_000 }), null, true, NOW).age, "3h");
-  assert.equal(deriveRow(meta({ createdAt: NOW + 10_000 }), null, true, NOW).age, "0s");
+  assert.equal(deriveRow(meta({ createdAt: NOW + 10_000 }), null, true, NOW).age, "just now");
 });

@@ -71,7 +71,8 @@ Pi session `.jsonl` files stay where Pi puts them; the worker reports the path i
    Not a repo: no worktree, cwd = dashboard cwd (row shows `no worktree`).
 3. Write `meta.json`.
 4. `tmux -L pi-agents -f <home>/tmux.conf new-session -d -s <id> -c <cwd> -x <cols> -y <rows>
-   -e PI_AGENTS_ID=<id> -e PI_AGENTS_HOME=<home> -e HERDR_ENV=0 -- <pi> --tui-mode fullscreen --name <name> -- <prompt>`
+   -e PI_AGENTS_ID=<id> -e PI_AGENTS_HOME=<home> -e HERDR_ENV=0 -- <pi> --tui-mode fullscreen --model <provider/id> --thinking <level> --name <name> -- <prompt>`
+   (`--model`/`--thinking` = the dashboard Pi's current model and thinking level, captured when the dashboard opens; omitted when Pi has no model.)
    (`HERDR_ENV=0` stops the herdr integration in children from reporting into the dashboard's pane.)
    `<pi>` = `$PI_AGENTS_PI_BIN` or `pi`.
 
@@ -97,31 +98,56 @@ Dashboard derives a row state (first match wins):
 | Row state | Condition | Icon | Summary |
 |---|---|---|---|
 | `stopped` | tmux session not alive | `∙` dim | `lastText` first line, or `Exited before starting` |
-| `needs_input` | `uiPrompt` set, or idle + `lastOutcome=completed` + `lastText` ends with `?` | `●` warning | `uiPrompt.title`, else last sentence ending in `?` |
+| `needs_input` | `uiPrompt` set, or idle + `lastOutcome=completed` + `lastText` ends with `?` | `◆` warning | `uiPrompt.title`, else last sentence ending in `?` |
 | `working` | no status yet (`Starting…`), or `phase=working` | animated `✽✻✶✢` accent | `activity` or `Working…` |
 | `failed` | idle + `lastOutcome` error | `✗` error | `lastText` first line |
-| `done` | otherwise | `✓` success | `lastText` first line |
+| `done` | otherwise | `◇` success | `lastText` first line |
 
 "Ends with `?`" ignores trailing whitespace and the characters `` * _ ` ) " ' ``.
 Groups render in the order Needs input, Working, Done, Failed, Stopped; newest first inside a group.
-Age = now − `createdAt`, shown as `45s`, `12m`, `3h`, `2d`.
+Age = now − `createdAt`, shown as `just now` (under a minute), `12m`, `3h`, `2d`.
 
 ## 6. Dashboard UI
 
+Layout modelled on Grok Build's agent dashboard:
+
 ```
- Agents  1 needs input · 2 working · 3 done
- Needs input (1)
- ▸ ● fix login test        my-app   Should I also update the snapshot?          12m
- Working (2)
-   ✽ add rate limiter      my-app   bash: npm test                               3m
- ── peek ─────────────────────────────── (only when open)
- fix login test · my-app · pi-agents/fix-login-test-3f9a · needs input · claude-opus-5-5
- <last ~12 wrapped lines of lastText>
- reply › _
- ───────────────────────────────────────
- › Describe a task for a new agent…
- ↑↓ select · enter attach · space peek · ctrl+x delete · esc close
+ main ~/www/my-app                                   ◆ 1 needs input │ ✽ 1 working │ ◇ 1 done
+ + New Agent in Worktree                                      Peek Space │ Attach → │ Delete ^X
+
+ ▾ Needs input 1 ─────────────────────────────────────────────────────────────────────────────
+▌◆ Fix login test  worktree my-app · fix-login-test-3f9a                                   12m
+▌  Should I also update the snapshot?
+
+ ▾ Working 1 ─────────────────────────────────────────────────────────────────────────────────
+ ✽ Add rate limiter  worktree my-app · add-rate-limiter-a1b2                                3m
+   bash: npm test
+                                     (filler — the boxes stay pinned to the bottom)
+ ╭─ Fix login test · my-app · pi-agents/fix-login-test-3f9a · needs input · claude-opus-5-5 ─╮   (peek only)
+ │ <last ~12 wrapped lines of lastText>                                                       │
+ │ ▸ Should I also update the snapshot?                                                       │
+ │ reply ❯ _                                                                                  │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────╯
+ ╭────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ ❯ Dispatch a new agent                                                                     │
+ ╰───────────────────────────────────────────────────────────── claude-opus-5-5 (high) ───────╯
+ ↑↓:select │ Enter:attach │ Esc:close
 ```
+
+- Title bar: branch (dim) and launch dir (`~`-shortened) left; per-state icon counts right.
+- Action line: `+ New Agent in Worktree` (launch dir in a repo) or `+ New Agent`; row actions right once rows exist.
+- Group header: `▾ <label> <count>` and a rule to the edge.
+- Rows take two lines. Line 1: icon, name with its first letter upper-cased (bold), then the `worktree` badge (warning)
+  and `repo · <branch without pi-agents/>` (dim), or `no worktree`; age flush right. Line 2: the summary — warning
+  for needs input, error for failed, dim otherwise.
+- Selected row: accent `▌` on both lines and the `selectedBg` background across the full width.
+- Peek box: the header lives in its top border. For a needs-input row the question gets its own `▸` line (warning)
+  above the reply, and is not repeated at the end of the text.
+- Input box: pinned to the bottom; its bottom border carries the model label new agents get (§4).
+- Key hints, `key:action`: `↑↓:select │ Enter:attach │ Esc:close` (input empty),
+  `Enter:create │ ⇧Enter:create + attach │ Esc:clear` (typing), `↑↓:select │ Enter:send │ →:attach │ Esc:close peek` (peek).
+- Spacing: 1-column left margin from width 20; at height ≥ 20 blank lines after the action line, between groups and
+  between rows, otherwise compact.
 
 Keys, list mode (dispatch input focused):
 - `↑`/`↓` move selection. `Enter`: input empty → attach selected; else dispatch. `Shift+Enter` with text → dispatch + attach.
