@@ -120,6 +120,22 @@ export async function readMeta(home: string, id: string): Promise<AgentMeta | nu
   return isAgentMeta(v) ? v : null;
 }
 
+/**
+ * Sets meta.json's `name` (README "Naming"); false when the agent is gone. Never recreates a removed
+ * agent dir, so a name arriving after a delete is dropped.
+ */
+export async function renameAgent(home: string, id: string, name: string): Promise<boolean> {
+  const meta = await readMeta(home, id);
+  if (meta === null) return false;
+  try {
+    await writeFileAtomic(metaPath(home, id), JSON.stringify({ ...meta, name }, null, 2) + "\n");
+    return true;
+  } catch (err) {
+    if (isErrnoCode(err, "ENOENT")) return false; // removed between the read and the write
+    throw err;
+  }
+}
+
 /** Ids of agent dirs that contain meta.json, sorted; [] when home or agents dir is missing. */
 export async function listAgentIds(home: string): Promise<string[]> {
   let entries: import("node:fs").Dirent[];

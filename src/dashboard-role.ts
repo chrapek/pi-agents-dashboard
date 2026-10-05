@@ -4,7 +4,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import type { Component, Focusable, OverlayOptions } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
+import { resolveConfig } from "./config.ts";
 import { currentBranch, repoRoot } from "./git.ts";
+import { createNamer, type Namer } from "./namer.ts";
 import { resolveHome, tmuxConfPath } from "./paths.ts";
 import { AgentService } from "./service.ts";
 import { Tmux } from "./tmux.ts";
@@ -22,6 +24,9 @@ export const NEEDS_TUI_MESSAGE = "The agent dashboard needs the interactive TUI"
  */
 export const DASHBOARD_OVERLAY_OPTIONS: OverlayOptions = { width: "100%", maxHeight: "100%", anchor: "top-left" };
 
+/** Upper bound on waiting for in-flight input (key releases) before handing the terminal to tmux. */
+const ATTACH_DRAIN_MAX_MS = 300;
+
 type DashboardComponent = Component & Focusable & { dispose(): void };
 
 /** Test seams; Pi wiring passes none of these. */
@@ -35,6 +40,8 @@ export interface DashboardRoleDeps {
   createDashboard?: (opts: DashboardOptions) => DashboardComponent;
   /** Branch and repo membership of the launch dir; default asks git. */
   gitInfo?: (cwd: string) => Promise<{ branch: string | null; inRepo: boolean }>;
+  /** Environment for config overrides; default `process.env`. */
+  env?: Record<string, string | undefined>;
 }
 
 async function defaultGitInfo(cwd: string): Promise<{ branch: string | null; inRepo: boolean }> {
@@ -111,13 +118,20 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
   let uiPromptOpen = false;
   let unsubscribeInput: (() => void) | undefined;
   let model: ModelChoice | null = null; // captured when the dashboard opens; read by every dispatch
+  let namer: Namer | null = null; // built when the dashboard opens; read by every dispatch
+  const reportedNamingProblems = new Set<string>();
 
   /** Built on first open, so loading the extension never touches the store or tmux. */
   function getWiring(): { service: DashboardService; tmux: Tmux } {
     if (!wiring) {
       const home = deps.home ?? resolveHome();
       const tmux = deps.tmux ?? new Tmux({ configPath: tmuxConfPath(home) });
-      const service: DashboardService = deps.service ?? new AgentService({ home, tmux, modelArgs: () => modelArgs(model) });
+      const service: DashboardService = deps.service ?? new AgentService({
+        home,
+        tmux,
+        modelArgs: () => modelArgs(model),
+        namer: () => namer,
+      });
       wiring = { service, tmux };
     }
     return wiring;
@@ -125,16 +139,39 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
 
   function attach(ctx: ExtensionContext, tmux: Tmux, id: string): Promise<void> {
     return ctx.ui.custom<void>((tui, _theme, _kb, done) => {
-      tui.stop();
-      process.stdout.write("\x1b[2J\x1b[H");
-      const res = tmux.attachSync(id);
-      tui.start();
-      tui.requestRender(true);
-      done();
-      if (res.error) ctx.ui.notify(res.error.message, "error");
-      else if (res.status !== 0) ctx.ui.notify(`tmux attach failed: exit ${res.status}`, "error");
+      void (async () => {
+        // The attach key fires on press; with the kitty protocol on, its release (`ESC[1;1:3C` for "→")
+        // is still in flight. Disable the protocol and swallow pending input first, or tmux receives the
+        // release, cannot parse it, and leaves `1;1:3C` in the agent's input.
+        await tui.terminal.drainInput(ATTACH_DRAIN_MAX_MS).catch(() => {}); // never block the attach
+        tui.stop();
+        process.stdout.write("\x1b[2J\x1b[H");
+        const res = tmux.attachSync(id);
+        tui.start();
+        tui.requestRender(true);
+        done();
+        if (res.error) ctx.ui.notify(res.error.message, "error");
+        else if (res.status !== 0) ctx.ui.notify(`tmux attach failed: exit ${res.status}`, "error");
+      })();
       return { render: () => [], invalidate() {} };
     });
+  }
+
+  /** Re-reads the config (README "Naming") and builds the namer; each problem is reported once. */
+  function setupNaming(ctx: ExtensionContext): void {
+    const { config, errors } = resolveConfig({ env: deps.env ?? process.env, settings: pi.getSettings() });
+    const problems = [...errors];
+    namer = null;
+    if (config.namingModel !== null) {
+      const made = createNamer(ctx.modelRegistry, config.namingModel);
+      if (typeof made === "function") namer = made;
+      else problems.push(made.error);
+    }
+    const fresh = problems.filter((p) => !reportedNamingProblems.has(p));
+    for (const p of fresh) reportedNamingProblems.add(p);
+    if (fresh.length > 0) {
+      ctx.ui.notify(`${namer === null ? "Agent naming off" : "Agent dashboard config"}: ${fresh.join("; ")}`, "warning");
+    }
   }
 
   async function headerContext(ctx: ExtensionContext): Promise<HeaderContext> {
@@ -145,6 +182,7 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
   async function runDashboard(ctx: ExtensionContext): Promise<void> {
     const { service, tmux } = getWiring();
     model = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id, thinking: pi.getThinkingLevel() } : null;
+    setupNaming(ctx);
     const context = await headerContext(ctx);
     let selected: string | undefined;
     while (true) {

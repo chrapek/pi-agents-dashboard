@@ -289,6 +289,74 @@ test("dispatch passes modelArgs before --name", async () => {
   ]);
 });
 
+/** A namer whose answer the test releases by hand; records the prompts it was asked about. */
+function gatedNamer() {
+  const prompts: string[] = [];
+  let release!: (name: string | null) => void;
+  const answer = new Promise<string | null>((resolve) => (release = resolve));
+  return { prompts, release, answer, namer: (prompt: string) => (prompts.push(prompt), answer) };
+}
+
+test("dispatch returns at once with the slug name, then the namer's name replaces meta.name", async () => {
+  const g = gatedNamer();
+  const f = await fixture({ randHex: () => "face", namer: () => g.namer });
+  const meta = await f.service.dispatch("  the login page redirects to 404, fix it  ", await newDir("plain"));
+
+  assert.equal(meta.name, "the login page redirects to 404");
+  assert.deepEqual(g.prompts, ["the login page redirects to 404, fix it"]);
+  assert.equal((await readMeta(f.home, meta.id))!.name, meta.name);
+  assert.deepEqual((await f.record(meta.id)).argv.slice(2, 4), ["--name", meta.name]);
+
+  g.release("Fix login redirect");
+  const renamed = await waitFor(async () => {
+    const m = await readMeta(f.home, meta.id);
+    return m?.name === "Fix login redirect" ? m : undefined;
+  }, 5_000);
+  assert.deepEqual(renamed, { ...meta, name: "Fix login redirect" });
+  assert.equal((await f.service.snapshot())[0]!.name, "Fix login redirect");
+});
+
+test("a null name from the namer leaves the slug name", async () => {
+  const g = gatedNamer();
+  const f = await fixture({ randHex: () => "face", namer: () => g.namer });
+  const meta = await f.service.dispatch("keep my name", await newDir("plain"));
+  g.release(null);
+  await g.answer;
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await readMeta(f.home, meta.id))!.name, "keep my name");
+});
+
+test("a name arriving after the agent was removed is dropped without recreating the agent dir", async () => {
+  const g = gatedNamer();
+  const f = await fixture({ randHex: () => "face", namer: () => g.namer });
+  const meta = await f.service.dispatch("short lived", await newDir("plain"));
+  assert.deepEqual(await f.service.remove(meta.id, true), { removed: true });
+  g.release("Too late");
+  await g.answer;
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(await exists(agentDir(f.home, meta.id)), false);
+});
+
+test("a failed dispatch never applies the name", async () => {
+  const g = gatedNamer();
+  const base = await newDir("case");
+  const home = path.join(base, "home");
+  const tmux = new Tmux({ configPath: tmuxConfPath(home), bin: FAILING_TMUX, socket: testSocket() });
+  const service = new AgentService({ home, tmux, piBin: "/bin/true", randHex: () => "dead", namer: () => g.namer });
+  await assert.rejects(service.dispatch("doomed", await newDir("plain")));
+  g.release("Doomed task");
+  await g.answer;
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(await exists(agentDir(home, "doomed-dead")), false);
+});
+
+test("no namer (or a getter returning null) keeps today's behaviour", async () => {
+  const f = await fixture({ randHex: () => "face", namer: () => null });
+  const meta = await f.service.dispatch("plain name", await newDir("plain"));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await readMeta(f.home, meta.id))!.name, "plain name");
+});
+
 test("dispatch rejects an empty or whitespace-only prompt without creating anything", async () => {
   const f = await fixture();
   const launchCwd = await newDir("plain");

@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
-import { drainInbox, readStatus, writeStatus } from "./store.ts";
+import { nameFromId } from "./ids.ts";
+import { drainInbox, readMeta, readStatus, writeStatus } from "./store.ts";
 import { initialStatus, isUrgent, reduceStatus, type WorkerEvent } from "./worker-status.ts";
 
 /** Trailing coalescing window for non-urgent status writes. */
@@ -50,6 +51,10 @@ export function registerWorker(pi: ExtensionAPI, id: string, home: string, deps:
   let writeTimer: NodeJS.Timeout | undefined;
   let pollTimer: NodeJS.Timeout | undefined;
   let draining = false;
+  // meta.name last applied as the session name. Starts as the slug name the dashboard passed with `--name`,
+  // so only a name the dashboard generated later is pushed, and a `/name` typed in the agent is kept.
+  let appliedName = nameFromId(id);
+  let syncingName = false;
   let unsubscribeInput: (() => void) | undefined;
   // A prompt was sent or typed (idle input / before_agent_start) but its agent_start has not arrived yet. Pi only
   // marks the run active after sendUserMessage returns, and a followUp sent while no run is active
@@ -115,6 +120,22 @@ export function registerWorker(pi: ExtensionAPI, id: string, home: string, deps:
     }
   }
 
+  /** Mirrors a changed meta.name (README "Naming") into Pi's session name. */
+  async function syncName(): Promise<void> {
+    if (syncingName || !session) return;
+    syncingName = true;
+    try {
+      const name = (await readMeta(home, id))?.name;
+      if (name === undefined || name === appliedName || !session) return;
+      appliedName = name;
+      if (pi.getSessionName() !== name) pi.setSessionName(name);
+    } catch {
+      // retried on the next poll
+    } finally {
+      syncingName = false;
+    }
+  }
+
   function subscribeDetachKey(ctx: ExtensionContext): void {
     unsubscribeInput?.();
     unsubscribeInput = undefined;
@@ -134,7 +155,10 @@ export function registerWorker(pi: ExtensionAPI, id: string, home: string, deps:
     session = ctx;
     subscribeDetachKey(ctx);
     if (!pollTimer) {
-      pollTimer = setInterval(() => void pollInbox(), pollMs);
+      pollTimer = setInterval(() => {
+        void pollInbox();
+        void syncName();
+      }, pollMs);
       pollTimer.unref();
     }
     await apply({

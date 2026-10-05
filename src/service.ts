@@ -4,9 +4,10 @@ import path from "node:path";
 import { createWorktree, deleteBranch, deleteBranchIfMerged, isDirty, removeWorktree, repoRoot } from "./git.ts";
 import { makeId, nameFromId } from "./ids.ts";
 import { agentDir, agentsDir, tmuxConfPath, worktreePath } from "./paths.ts";
+import type { Namer } from "./namer.ts";
 import { deriveRow, sortRows } from "./state.ts";
 import type { Row } from "./state.ts";
-import { enqueueInbox, listAgentIds, readMeta, readStatus, removeAgentDir, writeMeta } from "./store.ts";
+import { enqueueInbox, listAgentIds, readMeta, readStatus, removeAgentDir, renameAgent, writeMeta } from "./store.ts";
 import type { AgentMeta, AgentStatus } from "./store.ts";
 import { Tmux, TmuxError } from "./tmux.ts";
 
@@ -29,6 +30,11 @@ export interface AgentServiceOptions {
   randHex?: () => string; // passed to makeId
   /** Extra argv for a new session, e.g. `--model p/id --thinking high`; read at each dispatch. Default none. */
   modelArgs?: () => string[];
+  /**
+   * Names new agents (README "Naming"); read at each dispatch, null = no naming. The agent starts with
+   * its slug name and meta.name is replaced when the namer answers. Default none.
+   */
+  namer?: () => Namer | null;
 }
 
 // Attempts at finding an id whose agent dir and tmux session are both free.
@@ -92,6 +98,7 @@ export class AgentService implements DashboardService {
   private readonly now: () => number;
   private readonly randHex: (() => string) | undefined;
   private readonly modelArgs: () => string[];
+  private readonly namer: () => Namer | null;
 
   constructor(opts: AgentServiceOptions) {
     this.home = opts.home;
@@ -101,6 +108,7 @@ export class AgentService implements DashboardService {
     this.now = opts.now ?? Date.now;
     this.randHex = opts.randHex;
     this.modelArgs = opts.modelArgs ?? (() => []);
+    this.namer = opts.namer ?? (() => null);
   }
 
   async snapshot(): Promise<Row[]> {
@@ -126,6 +134,8 @@ export class AgentService implements DashboardService {
   async dispatch(rawPrompt: string, launchCwd: string): Promise<AgentMeta> {
     const prompt = rawPrompt.trim();
     if (prompt === "") throw new Error("dispatch: prompt is empty");
+    // Asked right away so the name is ready sooner; only applied once the dispatch has succeeded.
+    const naming = Promise.resolve(this.namer()?.(prompt) ?? null).catch(() => null);
     const root = await repoRoot(launchCwd);
     const id = await this.freeId(prompt, root);
     const worktree = root === null ? null : worktreePath(this.home, path.basename(root), id);
@@ -173,7 +183,18 @@ export class AgentService implements DashboardService {
       ]);
       throw err;
     }
+    void this.applyName(id, naming);
     return meta;
+  }
+
+  /** Background half of dispatch: stores the generated name; failures keep the slug name. */
+  private async applyName(id: string, naming: Promise<string | null>): Promise<void> {
+    try {
+      const name = await naming;
+      if (name !== null) await renameAgent(this.home, id, name);
+    } catch {
+      // the agent keeps its slug name
+    }
   }
 
   async reply(id: string, text: string): Promise<"queued" | "restarted"> {

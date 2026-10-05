@@ -12,6 +12,7 @@ import {
   enqueueInbox,
   drainInbox,
   removeAgentDir,
+  renameAgent,
   type AgentMeta,
   type AgentStatus,
 } from "../src/store.ts";
@@ -411,4 +412,17 @@ test("removeAgentDir removes everything and is ok when missing", async () => {
   await assert.rejects(fs.stat(agentDir(home, id)), { code: "ENOENT" });
   await removeAgentDir(home, id);
   assert.deepEqual(await listAgentIds(home), []);
+});
+
+test("renameAgent rewrites only meta.name and returns true", async () => {
+  const m = meta("fix-bug-a1b2");
+  await writeMeta(home, m);
+  assert.equal(await renameAgent(home, m.id, "Fix login redirect"), true);
+  assert.deepEqual(await readMeta(home, m.id), { ...m, name: "Fix login redirect" });
+  assert.deepEqual((await fs.readdir(agentDir(home, m.id))).sort(), ["meta.json"]);
+});
+
+test("renameAgent on a removed agent returns false and does not recreate its dir", async () => {
+  assert.equal(await renameAgent(home, "gone-a1b2", "Whatever"), false);
+  await assert.rejects(fs.stat(agentDir(home, "gone-a1b2")));
 });

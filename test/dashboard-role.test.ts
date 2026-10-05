@@ -34,7 +34,7 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 type InputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
 type CommandHandler = (args: string, ctx: unknown) => Promise<void>;
 
-function fakePi(flags: Record<string, boolean | string | undefined> = {}) {
+function fakePi(flags: Record<string, boolean | string | undefined> = {}, settings: unknown = {}) {
   const handlers = new Map<string, Handler[]>();
   const commands = new Map<string, { description?: string; handler: CommandHandler }>();
   const registeredFlags = new Map<string, unknown>();
@@ -53,6 +53,7 @@ function fakePi(flags: Record<string, boolean | string | undefined> = {}) {
       return flags[name];
     },
     getThinkingLevel: () => "high",
+    getSettings: () => settings,
   };
   async function emit(type: string, event: Record<string, unknown>, ctx: unknown): Promise<void> {
     for (const h of handlers.get(type) ?? []) await h({ type, ...event }, ctx);
@@ -70,7 +71,9 @@ interface CustomCall {
  * Fake ctx whose `ui.custom` runs the factory against a fake TUI. Dashboard calls are answered from
  * `results` (in order); with no scripted result left the promise stays pending until `done` is called.
  */
-function fakeCtx(opts: { mode?: string; hasUI?: boolean; results?: DashboardResult[]; customError?: Error } = {}) {
+function fakeCtx(
+  opts: { mode?: string; hasUI?: boolean; results?: DashboardResult[]; customError?: Error; knownModels?: string[] } = {},
+) {
   const log: string[] = [];
   const results = [...(opts.results ?? [])];
   const state = {
@@ -81,7 +84,13 @@ function fakeCtx(opts: { mode?: string; hasUI?: boolean; results?: DashboardResu
     customCalls: [] as CustomCall[],
   };
   const tui = {
-    terminal: { rows: ROWS, columns: 80 },
+    terminal: {
+      rows: ROWS,
+      columns: 80,
+      drainInput: async () => {
+        log.push("drain");
+      },
+    },
     stop: () => log.push("stop"),
     start: () => log.push("start"),
     requestRender: (force?: boolean) => log.push(force ? "render:force" : "render"),
@@ -91,6 +100,14 @@ function fakeCtx(opts: { mode?: string; hasUI?: boolean; results?: DashboardResu
     mode: opts.mode ?? "tui",
     hasUI: opts.hasUI ?? true,
     cwd: "/launch/dir",
+    modelRegistry: {
+      find: (provider: string, id: string) =>
+        (opts.knownModels ?? ["openai/gpt-6-luna"]).includes(`${provider}/${id}`) ? { provider, id } : undefined,
+      hasConfiguredAuth: () => true,
+      streamSimple: () => {
+        throw new Error("not used");
+      },
+    },
     ui: {
       getEditorText: () => state.editorText,
       notify: (message: string, type?: unknown) => state.notes.push([message, type]),
@@ -202,6 +219,47 @@ test("the dashboard header shows the launch dir, its branch and the model new ag
   assert.deepEqual(created[0]!.context, { cwd: "~/www/app", branch: "main", inRepo: true, modelLabel: "claude-opus-5-5 (high)" });
 });
 
+test("a usable naming model opens the dashboard without notices", async () => {
+  const { pi, commands } = fakePi();
+  const { ctx, log, state } = fakeCtx({ results: [{ type: "close" }] });
+  const { deps } = fakeDeps(log);
+  registerDashboardRole(pi, { ...deps, env: {} });
+  await commands.get("agents")!.handler("", ctx);
+  assert.deepEqual(state.notes, []);
+});
+
+test("naming config problems are reported once per problem, and the dashboard still opens", async () => {
+  const { pi, commands } = fakePi({}, { agentDashboard: { namingModel: "nope" } });
+  const { ctx, log, state } = fakeCtx({ results: [{ type: "close" }, { type: "close" }] });
+  const { deps, created } = fakeDeps(log);
+  registerDashboardRole(pi, { ...deps, env: {} });
+  await commands.get("agents")!.handler("", ctx);
+  await commands.get("agents")!.handler("", ctx);
+  assert.equal(created.length, 2);
+  assert.equal(state.notes.length, 1);
+  assert.match(state.notes[0]![0], /naming off.*agentDashboard\.namingModel/i);
+  assert.equal(state.notes[0]![1], "warning");
+});
+
+test("an unusable naming model (not in the catalog) is reported", async () => {
+  const { pi, commands } = fakePi();
+  const { ctx, log, state } = fakeCtx({ results: [{ type: "close" }], knownModels: [] });
+  const { deps } = fakeDeps(log);
+  registerDashboardRole(pi, { ...deps, env: { PI_AGENTS_NAMING_MODEL: "openai/missing" } });
+  await commands.get("agents")!.handler("", ctx);
+  assert.equal(state.notes.length, 1);
+  assert.match(state.notes[0]![0], /openai\/missing is not in the model catalog/);
+});
+
+test('naming "off" is silent', async () => {
+  const { pi, commands } = fakePi({}, { agentDashboard: { namingModel: "off" } });
+  const { ctx, log, state } = fakeCtx({ results: [{ type: "close" }], knownModels: [] });
+  const { deps } = fakeDeps(log);
+  registerDashboardRole(pi, { ...deps, env: {} });
+  await commands.get("agents")!.handler("", ctx);
+  assert.deepEqual(state.notes, []);
+});
+
 test("displayPath, modelLabel and modelArgs", () => {
   assert.equal(displayPath("/home/me", "/home/me"), "~");
   assert.equal(displayPath("/home/me/www/x", "/home/me"), "~/www/x");
@@ -269,7 +327,9 @@ test("the overlay component pads the dashboard to the full terminal height and f
   assert.deepEqual(log, ["custom:dashboard"]);
 });
 
-test("attach loop: stop TUI, tmux attach, start TUI, reopen with the row selected", async () => {
+// Draining first disables the kitty protocol and swallows the → key-release (`ESC[1;1:3C`), which
+// tmux would otherwise forward into the agent's input as `1;1:3C`.
+test("attach loop: drain input, stop TUI, tmux attach, start TUI, reopen with the row selected", async () => {
   const { pi, commands } = fakePi();
   const { ctx, log, state } = fakeCtx({ results: [{ type: "attach", id: "fix-bug-a1b2" }, { type: "close" }] });
   const { deps, created } = fakeDeps(log);
@@ -278,6 +338,7 @@ test("attach loop: stop TUI, tmux attach, start TUI, reopen with the row selecte
   assert.deepEqual(log, [
     "custom:dashboard",
     "custom:plain",
+    "drain",
     "stop",
     "attach:fix-bug-a1b2",
     "start",

@@ -87,6 +87,37 @@ Row states: `◆` Needs input, `✽` Working, `◇` Done, `✗` Failed, `∙` St
 
 New agents start with the model and thinking level the dashboard's Pi is using (shown under the input box).
 
+## Naming
+
+A new agent first appears under a name cut from its prompt (`fix the login redirect on`). In the background
+a small model reads the prompt and gives it a short title (`Fix SSO redirect and add regression test`), usually
+within a few seconds. The title replaces the name in the dashboard and becomes the agent's Pi session name
+(as with `/name`). The agent id, tmux session, worktree and `pi-agents/<id>` branch keep the prompt slug.
+
+If the model fails, times out (10 s) or has no credentials, the agent keeps the prompt name. A name you set
+with `/name` inside an agent is kept unless the dashboard renames that agent again. Closing the dashboard's Pi
+right after a dispatch drops the pending name.
+
+## Configuration
+
+All options live in one `agentDashboard` block in Pi's `settings.json` (global or project). An environment
+variable, where there is one, overrides the setting.
+
+```json
+{
+  "agentDashboard": {
+    "namingModel": "openai/gpt-6-luna"
+  }
+}
+```
+
+| Setting | Env var | Default | Meaning |
+|---|---|---|---|
+| `namingModel` | `PI_AGENTS_NAMING_MODEL` | `openai/gpt-6-luna` | `provider/id` of the model that names new agents, or `"off"` |
+
+Settings are read each time the dashboard opens. An invalid value or an unusable model shows a warning
+once and turns that feature off.
+
 ## Storage
 
 `<home>` is `$PI_AGENTS_HOME` if set, else `$PI_CODING_AGENT_DIR/agents-dashboard`, else
@@ -108,6 +139,7 @@ Environment variables:
 |---|---|
 | `PI_AGENTS_HOME` | Overrides `<home>` |
 | `PI_AGENTS_PI_BIN` | The `pi` binary agents run (default `pi`) |
+| `PI_AGENTS_NAMING_MODEL` | Naming model, see [Configuration](#configuration) |
 | `PI_AGENTS_ID` | Set by the dashboard in every agent; it makes the extension run as an agent, not a dashboard |
 
 An agent's Pi reads `PI_AGENTS_ID` and `PI_AGENTS_HOME` once at startup and then removes them from its

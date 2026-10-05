@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { enqueueInbox, readStatus, writeMeta, writeStatus, type AgentStatus } from "../src/store.ts";
+import { enqueueInbox, readStatus, renameAgent, writeMeta, writeStatus, type AgentStatus } from "../src/store.ts";
 import { inboxDir } from "../src/paths.ts";
 import { registerWorker, type WorkerDeps } from "../src/worker.ts";
 
@@ -49,7 +49,14 @@ function fakePi() {
   const handlers = new Map<string, Handler[]>();
   const commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>();
   const sent: Sent[] = [];
+  const names: string[] = [];
   const api = {
+    setSessionName(name: string) {
+      names.push(name);
+    },
+    getSessionName() {
+      return names.at(-1);
+    },
     on(event: string, handler: Handler) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
       return () => {};
@@ -64,7 +71,7 @@ function fakePi() {
   async function emit(type: string, event: Record<string, unknown>, ctx: unknown): Promise<void> {
     for (const h of handlers.get(type) ?? []) await h({ type, ...event }, ctx);
   }
-  return { pi: api as unknown as ExtensionAPI, handlers, commands, sent, emit };
+  return { pi: api as unknown as ExtensionAPI, handlers, commands, sent, names, emit };
 }
 
 function fakeCtx(opts: { hasUI?: boolean } = {}) {
@@ -122,6 +129,40 @@ async function waitFor(check: () => boolean | Promise<boolean>, ms = 2000): Prom
     await sleep(5);
   }
 }
+
+// --- naming ---
+
+test("a new meta.name from the dashboard becomes the Pi session name, once", async () => {
+  const w = setup();
+  await w.emit("session_start", { reason: "startup" }, w.ctx);
+  await sleep(60);
+  assert.deepEqual(w.names, [], "the slug name it was started with is not pushed again");
+  await renameAgent(home, ID, "Fix login redirect");
+  await waitFor(() => w.names.length > 0);
+  await sleep(60);
+  assert.deepEqual(w.names, ["Fix login redirect"]);
+});
+
+test("a name given while the agent was stopped is applied after it starts", async () => {
+  await renameAgent(home, ID, "Fix login redirect");
+  const w = setup();
+  await w.emit("session_start", { reason: "startup" }, w.ctx);
+  await waitFor(() => w.names.length > 0);
+  assert.deepEqual(w.names, ["Fix login redirect"]);
+});
+
+test("meta.name is not read before session_start or after session_shutdown", async () => {
+  const w = setup();
+  await renameAgent(home, ID, "Early");
+  await sleep(60);
+  assert.deepEqual(w.names, []);
+  await w.emit("session_start", { reason: "startup" }, w.ctx);
+  await waitFor(() => w.names.length > 0);
+  await w.shutdown();
+  await renameAgent(home, ID, "Late");
+  await sleep(60);
+  assert.deepEqual(w.names, ["Early"]);
+});
 
 // --- status writing ---
 
