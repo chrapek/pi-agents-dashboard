@@ -44,11 +44,17 @@ export const EMPTY_HINT = "No agents yet — describe a task below";
 export const LIST_FOOTER = "↑↓ select · enter attach · space peek · ctrl+x delete · esc close";
 export const PEEK_FOOTER = "↑↓ select · enter send · → attach · esc close peek";
 
-const NAME_MAX = 24;
+const NAME_MAX = 28;
 const REPO_MAX = 16;
 const MIN_SUMMARY = 10;
-const ROW_PREFIX_WIDTH = 4; // "▸ " + icon + " "
-const GAP = "  ";
+const ROW_INDENT = "  "; // rows sit under their group header
+const ROW_PREFIX_WIDTH = ROW_INDENT.length + 4; // indent + "▸ " + icon + " "
+const GAP = "   ";
+/** Left margin for every line once the terminal is wide enough to afford it. */
+const MARGIN = " ";
+const MARGIN_MIN_WIDTH = 20;
+/** At or above this height the layout adds blank lines between sections; below it stays compact. */
+export const ROOMY_MIN_HEIGHT = 20;
 // Lines kept for the list before the peek text takes the rest of the height.
 const MIN_LIST_WITH_PEEK = 3;
 
@@ -93,7 +99,7 @@ interface Columns {
 function columns(rows: Row[], width: number): Columns {
   const maxOf = (f: (r: Row) => string) => rows.reduce((m, r) => Math.max(m, visibleWidth(f(r))), 0);
   const ageW = maxOf((r) => r.age);
-  const avail = width - ROW_PREFIX_WIDTH - (ageW + 1);
+  const avail = width - ROW_PREFIX_WIDTH - (ageW + GAP.length);
   if (avail < 1) return { nameW: Math.max(0, width - ROW_PREFIX_WIDTH), repoW: 0, summaryW: 0, ageW: 0 };
   const nameW = Math.min(maxOf((r) => r.name), NAME_MAX, avail);
   let rest = avail - nameW;
@@ -109,7 +115,7 @@ function rowLine(r: Row, selected: boolean, frame: number, cols: Columns, width:
     r.state === "working"
       ? paint("accent", SPINNER_FRAMES[((frame % SPINNER_FRAMES.length) + SPINNER_FRAMES.length) % SPINNER_FRAMES.length]!)
       : paint(STATIC_ICONS[r.state].role, STATIC_ICONS[r.state].icon);
-  let line = (selected ? paint("accent", "▸ ") : "  ") + icon + " ";
+  let line = ROW_INDENT + (selected ? paint("accent", "▸ ") : "  ") + icon + " ";
   let used = ROW_PREFIX_WIDTH + cols.nameW;
   const name = fit(r.name, cols.nameW);
   line += selected ? paint("bold", name) : name;
@@ -132,13 +138,14 @@ interface ListLine {
   selected: boolean;
 }
 
-function listLines(view: DashboardView, width: number, paint: Paint): ListLine[] {
+function listLines(view: DashboardView, width: number, paint: Paint, roomy: boolean): ListLine[] {
   if (view.rows.length === 0) return [{ text: paint("dim", fit(EMPTY_HINT, width).trimEnd()), selected: false }];
   const cols = columns(view.rows, width);
   const lines: ListLine[] = [];
   for (const state of GROUP_ORDER) {
     const group = view.rows.filter((r) => r.state === state);
     if (group.length === 0) continue;
+    if (roomy && lines.length > 0) lines.push({ text: "", selected: false });
     lines.push({ text: paint("bold", clip(`${GROUP_LABELS[state]} (${group.length})`, width)), selected: false });
     for (const r of group) {
       const selected = r.id === view.selectedId;
@@ -185,40 +192,52 @@ interface Item {
   priority: number; // lowest is dropped first when the height is too small
 }
 
-export function renderDashboard(view: DashboardView, width: number, height: number, paint: Paint): string[] {
-  if (width < 1 || height < 1) return [];
+export function renderDashboard(view: DashboardView, outerWidth: number, height: number, paint: Paint): string[] {
+  if (outerWidth < 1 || height < 1) return [];
+  const margin = outerWidth >= MARGIN_MIN_WIDTH ? MARGIN : "";
+  const width = outerWidth - margin.length;
+  const roomy = height >= ROOMY_MIN_HEIGHT;
   const peek = view.peek;
   const counts = headerCounts(view.rows);
-  const header = clip(paint("bold", "Agents") + (counts ? "  " + paint("muted", counts) : ""), width);
-  const list = listLines(view, width, paint);
+  const header = clip(paint("bold", "Agents") + (counts ? "   " + paint("muted", counts) : ""), width);
+  const list = listLines(view, width, paint, roomy);
 
-  const fixed = 1 /* header */ + 3 /* separator, input, footer */ + (view.message ? 1 : 0);
+  // Blank lines in the roomy layout: after the header, before the separator, between input and footer.
+  const spacers = roomy ? 3 : 0;
+  const fixed = 1 /* header */ + 3 /* separator, input, footer */ + spacers + (view.message ? 1 : 0);
   const avail = height - fixed;
   let text: string[] = [];
   let listHeight = Math.max(0, avail);
   if (peek) {
     const allText = peekText(peek.lastText, peek.loading === true, width, paint);
-    const peekFixed = 3; // separator, header, reply
+    const peekFixed = 3 /* separator, header, reply */ + (roomy ? 3 : 0); /* gap above, below header, above reply */
     const textBudget = avail - peekFixed - Math.min(list.length, MIN_LIST_WITH_PEEK);
     const textCount = Math.max(0, Math.min(textBudget, PEEK_TEXT_LINES, allText.length));
     text = textCount > 0 ? allText.slice(-textCount) : [];
     listHeight = Math.max(0, avail - peekFixed - text.length);
   }
 
+  const spacer = (): Item => ({ text: "", priority: -1 });
   const items: Item[] = [{ text: header, priority: 3 }];
+  if (roomy) items.push(spacer());
   for (const line of scrollWindow(list, listHeight)) items.push({ text: line, priority: 0 });
   if (peek) {
+    if (roomy) items.push(spacer());
     items.push({ text: paint("border", clip("── peek " + "─".repeat(Math.max(0, width - 8)), width)), priority: 2 });
     items.push({ text: paint("bold", truncateToWidth(peekHeader(peek.row), width, "…")), priority: 4 });
+    if (roomy) items.push(spacer());
     for (const line of text) items.push({ text: line, priority: 0 });
+    if (roomy) items.push(spacer());
     items.push({ text: inputLine(REPLY_PROMPT, peek.reply, width, paint), priority: 7 });
   }
+  if (roomy) items.push(spacer());
   if (view.message) {
     const role = MESSAGE_ROLES[view.message.tone];
     items.push({ text: paint(role, truncateToWidth(view.message.text, width, "…")), priority: 5 });
   }
   items.push({ text: paint("border", "─".repeat(width)), priority: 2 });
   items.push({ text: inputLine(DISPATCH_PROMPT, view.input, width, paint), priority: peek ? 6 : 7 });
+  if (roomy) items.push(spacer());
   items.push({ text: paint("dim", truncateToWidth(peek ? PEEK_FOOTER : LIST_FOOTER, width, "…")), priority: 1 });
 
   while (items.length > height) {
@@ -226,5 +245,5 @@ export function renderDashboard(view: DashboardView, width: number, height: numb
     for (let i = 1; i < items.length; i++) if (items[i]!.priority < items[drop]!.priority) drop = i;
     items.splice(drop, 1);
   }
-  return items.map((item) => clip(item.text, width));
+  return items.map((item) => (item.text === "" ? "" : margin + clip(item.text, width)));
 }

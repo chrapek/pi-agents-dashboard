@@ -12,12 +12,16 @@ import {
   LIST_FOOTER,
   PEEK_FOOTER,
   PEEK_TEXT_LINES,
+  ROOMY_MIN_HEIGHT,
 } from "../../src/ui/view.ts";
 import type { DashboardView, Paint } from "../../src/ui/view.ts";
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const strip = (s: string): string => s.replace(ANSI_RE, "");
-const plainLines = (lines: string[]): string[] => lines.map(strip);
+/** Drops the 1-column left margin the renderer adds at widths ≥ 20. */
+const unmargin = (s: string): string => (s.startsWith(" ") ? s.slice(1) : s);
+const plainLines = (lines: string[]): string[] => lines.map(strip).map(unmargin);
+const isSelected = (l: string): boolean => l.trimStart().startsWith("▸ ");
 
 function row(overrides: Partial<Row> = {}): Row {
   return {
@@ -72,7 +76,7 @@ test("headerCounts lists only non-zero groups in group order", () => {
 
 test("first line is the Agents header with counts", () => {
   const lines = plainLines(renderDashboard(view({ rows: mixedRows, selectedId: "a" }), 120, 40, plainPaint));
-  assert.equal(lines[0], "Agents  1 needs input · 2 working · 1 done · 1 failed · 2 stopped");
+  assert.equal(lines[0], "Agents   1 needs input · 2 working · 1 done · 1 failed · 2 stopped");
 });
 
 test("group headers render in group order with counts, rows under their group", () => {
@@ -95,19 +99,20 @@ test("empty list shows the hint line and the header without counts", () => {
 
 test("row line: selected marker, icon, name, repo, summary, age right-aligned", () => {
   const lines = plainLines(renderDashboard(view({ rows: mixedRows, selectedId: "a" }), 100, 40, plainPaint));
+  const raw = renderDashboard(view({ rows: mixedRows, selectedId: "a" }), 100, 40, plainPaint);
+  assert.equal(visibleWidth(raw.find((l) => l.includes("fix login test"))!), 100);
   const sel = lines.find((l) => l.includes("fix login test"))!;
-  assert.ok(sel.startsWith("▸ ● fix login test"), sel);
+  assert.ok(sel.startsWith("  ▸ ● fix login test"), sel);
   assert.ok(sel.includes("my-app"));
   assert.ok(sel.includes("Should I also update the snapshot?"));
   assert.ok(sel.endsWith("12m"), sel);
-  assert.equal(visibleWidth(sel), 100);
   const other = lines.find((l) => l.includes("write docs"))!;
-  assert.ok(other.startsWith("  ✓ write docs"), other);
+  assert.ok(other.startsWith("    ✓ write docs"), other);
 });
 
 test("icons per state", () => {
   const lines = plainLines(renderDashboard(view({ rows: mixedRows, selectedId: "a" }), 100, 40, plainPaint));
-  const iconOf = (name: string) => lines.find((l) => l.includes(name))!.slice(2, 3);
+  const iconOf = (name: string) => lines.find((l) => l.includes(name))!.slice(4, 5);
   assert.equal(iconOf("fix login test"), "●");
   assert.equal(iconOf("add rate limiter"), SPINNER_FRAMES[0]);
   assert.equal(iconOf("write docs"), "✓");
@@ -121,7 +126,7 @@ test("working icon follows the spinner frame", () => {
       renderDashboard(view({ rows: mixedRows, selectedId: "a", spinnerFrame: frame }), 100, 40, plainPaint),
     );
     const line = lines.find((l) => l.includes("add rate limiter"))!;
-    assert.equal(line.slice(2, 3), SPINNER_FRAMES[frame % SPINNER_FRAMES.length]);
+    assert.equal(line.slice(4, 5), SPINNER_FRAMES[frame % SPINNER_FRAMES.length]);
   }
   assert.deepEqual(SPINNER_FRAMES, ["✽", "✻", "✶", "✢"]);
 });
@@ -207,13 +212,40 @@ test("dispatch input stays visible when the height is tiny", () => {
   assert.ok(lines[0]!.startsWith("› "));
 });
 
-test("short list is not padded: header, groups, rows, separator, input, footer", () => {
+test("short list is not padded; roomy layout spaces header, list, input and footer", () => {
   const lines = plainLines(renderDashboard(view({ rows: [row({ id: "a" })], selectedId: "a" }), 80, 40, plainPaint));
-  assert.equal(lines.length, 6);
-  assert.equal(lines[1], "Done (1)");
-  assert.equal(lines[3], "─".repeat(80));
-  assert.ok(lines[4]!.startsWith("› "));
-  assert.equal(lines[5], LIST_FOOTER);
+  assert.equal(lines.length, 9);
+  assert.equal(lines[1], "");
+  assert.equal(lines[2], "Done (1)");
+  assert.ok(lines[3]!.includes("fix login test"));
+  assert.equal(lines[4], "");
+  assert.equal(lines[5], "─".repeat(79));
+  assert.ok(lines[6]!.startsWith("› "));
+  assert.equal(lines[7], "");
+  assert.equal(lines[8], LIST_FOOTER);
+});
+
+test("below ROOMY_MIN_HEIGHT the layout is compact: no blank lines", () => {
+  const lines = plainLines(
+    renderDashboard(view({ rows: mixedRows, selectedId: "a" }), 80, ROOMY_MIN_HEIGHT - 1, plainPaint),
+  );
+  assert.ok(!lines.includes(""), JSON.stringify(lines));
+  assert.equal(lines[1], "Needs input (1)");
+});
+
+test("roomy layout separates groups with one blank line", () => {
+  const lines = plainLines(renderDashboard(view({ rows: mixedRows, selectedId: "a" }), 100, 40, plainPaint));
+  for (const g of ["Working (2)", "Done (1)", "Failed (1)", "Stopped (2)"]) {
+    assert.equal(lines[lines.indexOf(g) - 1], "", g);
+  }
+  assert.equal(lines[lines.indexOf("Needs input (1)") - 1], "", "blank line after the header");
+});
+
+test("left margin on every non-blank line at width ≥ 20, none below", () => {
+  const wide = renderDashboard(view({ rows: mixedRows, selectedId: "a" }), 80, 40, plainPaint);
+  for (const l of wide) assert.ok(l === "" || l.startsWith(" "), JSON.stringify(l));
+  const narrow = renderDashboard(view({ rows: mixedRows, selectedId: "a" }), 19, 40, plainPaint);
+  assert.equal(narrow[0]!.startsWith("Agents"), true);
 });
 
 function visibleIds(lines: string[]): string[] {
@@ -231,7 +263,7 @@ test("scrolling keeps the selection visible at top, middle and bottom", () => {
     assert.equal(lines.length, height);
     const ids = visibleIds(lines);
     assert.ok(ids.includes(`r${sel}`), `selected r${sel} not visible: ${ids.join(",")}`);
-    const selected = plainLines(lines).find((l) => l.startsWith("▸ "))!;
+    const selected = plainLines(lines).find(isSelected)!;
     assert.ok(selected.includes(`agent ${sel} `), selected);
   }
   // top: group header visible; bottom: last row visible
@@ -244,7 +276,7 @@ test("scrolling keeps the selection visible at top, middle and bottom", () => {
 test("scrolling works across group headers", () => {
   const rows = [...manyRows(20, "working"), ...manyRows(20, "done").map((r, i) => ({ ...r, id: `d${i}`, name: `done ${i}` }))];
   const lines = plainLines(renderDashboard(view({ rows, selectedId: "d10" }), 80, 10, plainPaint));
-  assert.ok(lines.some((l) => l.startsWith("▸ ") && l.includes("done 10 ")));
+  assert.ok(lines.some((l) => isSelected(l) && l.includes("done 10 ")));
   assert.equal(lines.length, 10);
 });
 
@@ -261,14 +293,17 @@ test("peek panel: separator, header, last 12 wrapped lines, reply input, peek fo
   const lines = plainLines(renderDashboard(v, 100, 60, plainPaint));
   const sepIdx = lines.findIndex((l) => l.startsWith("── peek "));
   assert.ok(sepIdx > 0);
-  assert.equal(visibleWidth(lines[sepIdx]!), 100);
+  assert.equal(visibleWidth(lines[sepIdx]!), 99);
+  assert.equal(lines[sepIdx - 1], "");
   assert.equal(
     lines[sepIdx + 1],
     "fix login test · my-app · pi-agents/fix-login-test-3f9a · needs input · claude-opus-5-5",
   );
-  const body = lines.slice(sepIdx + 2, sepIdx + 2 + PEEK_TEXT_LINES);
+  assert.equal(lines[sepIdx + 2], "");
+  const body = lines.slice(sepIdx + 3, sepIdx + 3 + PEEK_TEXT_LINES);
   assert.deepEqual(body, Array.from({ length: 12 }, (_, i) => `line ${i + 8}`));
-  assert.equal(lines[sepIdx + 2 + PEEK_TEXT_LINES], "reply › yes please");
+  assert.equal(lines[sepIdx + 3 + PEEK_TEXT_LINES], "");
+  assert.equal(lines[sepIdx + 4 + PEEK_TEXT_LINES], "reply › yes please");
   assert.equal(lines.at(-1), PEEK_FOOTER);
   assert.equal(PEEK_FOOTER, "↑↓ select · enter send · → attach · esc close peek");
 });
@@ -290,7 +325,7 @@ test("peek header omits null parts and shows `no worktree` for a null branch", (
   const lines = plainLines(renderDashboard(v, 80, 60, plainPaint));
   const sepIdx = lines.findIndex((l) => l.startsWith("── peek "));
   assert.equal(lines[sepIdx + 1], "fix login test · no worktree · working");
-  assert.equal(lines[sepIdx + 2], "No output yet");
+  assert.equal(lines[sepIdx + 3], "No output yet");
 });
 
 test("peek shows Loading… while its text is loading", () => {
@@ -298,7 +333,7 @@ test("peek shows Loading… while its text is loading", () => {
   const v = view({ rows: [r], selectedId: "a", peek: { row: r, lastText: null, loading: true, reply: { value: "", placeholder: "" } } });
   const lines = plainLines(renderDashboard(v, 80, 60, plainPaint));
   const sepIdx = lines.findIndex((l) => l.startsWith("── peek "));
-  assert.equal(lines[sepIdx + 2], "Loading…");
+  assert.equal(lines[sepIdx + 3], "Loading…");
 });
 
 test("peek shrinks its text before the list disappears when height is limited", () => {
@@ -306,7 +341,7 @@ test("peek shrinks its text before the list disappears when height is limited", 
   const v = view({ rows, selectedId: "r5", peek: { row: rows[5]!, lastText: "t\n".repeat(30), reply: { value: "", placeholder: "" } } });
   const lines = plainLines(renderDashboard(v, 80, 14, plainPaint));
   assert.equal(lines.length, 14);
-  assert.ok(lines.some((l) => l.startsWith("▸ ") && l.includes("agent 5 ")));
+  assert.ok(lines.some((l) => isSelected(l) && l.includes("agent 5 ")));
   assert.ok(lines.some((l) => l.startsWith("reply › ")));
 });
 
@@ -315,7 +350,7 @@ test("peek shrinks its text before the list disappears when height is limited", 
 test("message line sits between the list/peek and the input separator", () => {
   const v = view({ rows: [row({ id: "a" })], selectedId: "a", message: { text: "Dispatched fix login test", tone: "info" } });
   const lines = plainLines(renderDashboard(v, 80, 40, plainPaint));
-  const sepIdx = lines.indexOf("─".repeat(80));
+  const sepIdx = lines.indexOf("─".repeat(79));
   assert.equal(lines[sepIdx - 1], "Dispatched fix login test");
 });
 
@@ -339,7 +374,7 @@ test("dispatch input shows the placeholder when empty and the value otherwise", 
 test("a focused input's render callback is used for its line", () => {
   const v = view({ input: { value: "x", placeholder: "", render: (w) => `[${w}]` } });
   const lines = plainLines(renderDashboard(v, 40, 40, plainPaint));
-  assert.ok(lines.includes("› [38]"));
+  assert.ok(lines.includes("› [37]"));
 });
 
 test("footer variants: list mode and peek mode", () => {

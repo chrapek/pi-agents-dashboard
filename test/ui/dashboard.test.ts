@@ -169,7 +169,8 @@ async function setup(rows: Row[], opts: Partial<DashboardOptions> = {}, svc = ne
   });
   await d.refresh();
   await settle();
-  const screen = (width = 100) => d.render(width).map(strip);
+  // Drop the renderer's 1-column left margin so assertions read like the layout.
+  const screen = (width = 100) => d.render(width).map(strip).map((l) => (l.startsWith(" ") ? l.slice(1) : l));
   const lines = () => screen();
   const h: Harness = {
     d,
@@ -183,12 +184,18 @@ async function setup(rows: Row[], opts: Partial<DashboardOptions> = {}, svc = ne
       await settle();
     },
     screen,
-    selected: () => lines().find((l) => l.startsWith("▸ "))?.replace(/^▸ . /, "").split("  ")[0],
+    selected: () =>
+      lines()
+        .map((l) => l.trimStart())
+        .find((l) => l.startsWith("▸ "))
+        ?.replace(/^▸ . /, "")
+        .split("  ")[0],
     message: () => {
       const ls = lines();
-      const sep = ls.lastIndexOf("─".repeat(100));
+      const sep = ls.lastIndexOf("─".repeat(99));
       const above = ls[sep - 1];
-      const isOther = above === undefined || above === EMPTY_HINT || above.startsWith("reply › ") || /^[ ▸] /.test(above);
+      const isOther =
+        above === undefined || above === "" || above === EMPTY_HINT || above.startsWith("reply › ") || /^[ ▸] /.test(above);
       return isOther ? undefined : above;
     },
   };
@@ -250,7 +257,7 @@ test("refresh falls back to the nearest index when the selected row disappears",
 
 test("spinner advances one frame per refresh", async () => {
   const h = await setup([row("w", { state: "working" })]);
-  const icon = () => h.screen().find((l) => l.includes("agent w"))!.slice(2, 3);
+  const icon = () => h.screen().find((l) => l.includes("agent w"))!.slice(4, 5);
   const first = SPINNER_FRAMES.indexOf(icon());
   assert.ok(first >= 0);
   for (let i = 1; i <= 5; i++) {
@@ -535,7 +542,7 @@ test("Space with empty input opens peek for the selected row", async () => {
   const sep = lines.findIndex((l) => l.startsWith("── peek "));
   assert.ok(sep > 0);
   assert.equal(lines[sep + 1], "agent b · my-app · pi-agents/b · done · model-x");
-  assert.equal(lines[sep + 2], "output of b");
+  assert.equal(lines[sep + 3], "output of b");
   assert.ok(lines.some((l) => l.startsWith("reply › ")));
   assert.equal(lines.at(-1), PEEK_FOOTER);
   h.d.dispose();
@@ -825,7 +832,7 @@ test("peek: shows Loading… until the first peek for the selected row resolves"
   };
   const body = () => {
     const lines = h.screen();
-    return lines[lines.findIndex((l) => l.startsWith("── peek ")) + 2];
+    return lines[lines.findIndex((l) => l.startsWith("── peek ")) + 3];
   };
   await openPeek(h);
   assert.equal(body(), "Loading…");
@@ -845,7 +852,7 @@ test("peek: an agent without output shows No output yet once loaded", async () =
   h.svc.lastText.a = "";
   await openPeek(h);
   const lines = h.screen();
-  assert.equal(lines[lines.findIndex((l) => l.startsWith("── peek ")) + 2], "No output yet");
+  assert.equal(lines[lines.findIndex((l) => l.startsWith("── peek ")) + 3], "No output yet");
   h.d.dispose();
 });
 
@@ -923,9 +930,9 @@ test("focused is propagated to the input that has focus", async () => {
   const h = await setup(three());
   h.d.focused = true;
   const markerLine = () => h.d.render(100).find((l) => l.includes(CURSOR_MARKER));
-  assert.ok(strip(markerLine()!).startsWith("› "));
+  assert.ok(strip(markerLine()!).trimStart().startsWith("› "));
   await openPeek(h);
-  assert.ok(strip(markerLine()!).startsWith("reply › "));
+  assert.ok(strip(markerLine()!).trimStart().startsWith("reply › "));
   h.d.focused = false;
   assert.equal(markerLine(), undefined);
   h.d.dispose();
