@@ -60,6 +60,7 @@ List (the dispatch input at the bottom is focused):
 | `Space` (empty input) | Open peek for the selected agent |
 | `Ctrl+X` twice within 2 s | Delete the selected agent (tmux session, worktree, branch if merged, agent dir) |
 | `Esc` | Clear the input, or close the dashboard when it is empty |
+| `/` | Open Pi's command menu, see [Slash commands](#slash-commands) |
 
 If the worktree has uncommitted changes, the first `Ctrl+X` warns
 `Uncommitted changes in <path> — press ctrl+x again to discard`, and the second press removes it anyway.
@@ -86,6 +87,28 @@ Detaching never interrupts a running turn. Attaching to a stopped agent resumes 
 Row states: `◆` Needs input, `✽` Working, `◇` Done, `✗` Failed, `∙` Stopped (its tmux session is gone).
 
 New agents start with the model and thinking level the dashboard's Pi is using (shown under the input box).
+
+## Slash commands
+
+Type `/` in the dispatch input to get the same command menu as in Pi's editor: built-in commands, extension
+commands, prompt templates and skills, with argument completion (e.g. `/model cla…`).
+
+| Key (menu open) | Action |
+|---|---|
+| `↑` / `↓` | Move in the menu |
+| `Tab` | Complete the selected entry |
+| `Enter` | Complete it; a completed command name runs right away, as in Pi |
+| `Esc` | Close the menu (a second `Esc` clears the input) |
+
+What `Enter` does with a `/` line depends on the command:
+
+- **Built-in and extension commands** (`/model`, `/thinking high`, `/settings`, `/login`, `/quit`, …) close the
+  dashboard and run in this Pi, exactly as if typed into its editor. Commands that open a selector show it on
+  Pi's main screen. Press `←` on the empty prompt (or `/agents`) to come back; the dashboard then shows the new
+  model and thinking level, which the next agents inherit.
+- **Prompt templates and skills** are prompts, so they go to a new agent: `Enter` on a menu entry completes
+  `/skill:review ` and waits for you to type the task; `Enter` again dispatches `/skill:review <task>`.
+- **Anything else** starting with `/` (e.g. `/tmp/out.log is empty`) is dispatched like any other prompt.
 
 ## Naming
 

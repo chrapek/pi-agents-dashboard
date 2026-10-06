@@ -44,6 +44,8 @@ export interface DashboardView {
   peek: PeekView | null; // non-null = peek mode
   message: { text: string; tone: MessageTone } | null;
   input: InputLineModel;
+  /** The open `/` menu (Pi's command autocomplete), drawn under the input box; null or absent when closed. */
+  suggestions?: { render(width: number): string[] } | null;
   context: HeaderContext;
 }
 
@@ -72,6 +74,12 @@ export const LIST_HINTS_TYPING: readonly Hint[] = [
   ["Enter", "create"],
   ["⇧Enter", "create + attach"],
   ["Esc", "clear"],
+];
+export const SUGGESTION_HINTS: readonly Hint[] = [
+  ["↑↓", "choose"],
+  ["Tab", "complete"],
+  ["Enter", "run"],
+  ["Esc", "dismiss"],
 ];
 export const PEEK_HINTS: readonly Hint[] = [
   ["↑↓", "select"],
@@ -351,11 +359,19 @@ export function renderDashboard(view: DashboardView, outerWidth: number, height:
     { text: boxLine(inputContent(DISPATCH_PROMPT, view.input, boxInner(width), paint), width, paint), priority: peek ? 6 : 7 },
     { text: boxBottom(view.context.modelLabel ?? "", width, paint), priority: 2 },
   ];
-  const hints = peek ? PEEK_HINTS : view.input.value === "" ? LIST_HINTS_EMPTY : LIST_HINTS_TYPING;
+  // Pi's editor draws its autocomplete under the input, too; it outranks the list but not the input line.
+  const menu: Item[] = (peek ? [] : (view.suggestions?.render(width) ?? [])).map((text) => ({ text, priority: 6 }));
+  const hints = peek
+    ? PEEK_HINTS
+    : menu.length > 0
+      ? SUGGESTION_HINTS
+      : view.input.value === ""
+        ? LIST_HINTS_EMPTY
+        : LIST_HINTS_TYPING;
   const footer: Item = { text: footerLine(hints, width, paint), priority: 1 };
 
   const list = listLines(view, width, paint, roomy);
-  const fixed = top.length + bottom.length + inputBox.length + 1 + (peek ? 1 + peekTail.length : 0);
+  const fixed = top.length + bottom.length + inputBox.length + menu.length + 1 + (peek ? 1 + peekTail.length : 0);
   const avail = Math.max(0, height - fixed);
   if (peek) {
     const budget = avail - Math.min(list.length, MIN_LIST_WITH_PEEK);
@@ -374,7 +390,7 @@ export function renderDashboard(view: DashboardView, outerWidth: number, height:
     for (const line of peekBody) items.push({ text: boxLine(line, width, paint), priority: 0 });
     items.push(...peekTail);
   }
-  items.push(...inputBox, footer);
+  items.push(...inputBox, ...menu, footer);
 
   while (items.length > height) {
     let drop = 0;

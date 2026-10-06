@@ -15,4 +15,5 @@ export interface DashboardService {
   remove(id: string, force: boolean): Promise<{ removed: boolean; dirty?: string; branchKept?: string }>;
 }
 
-export type DashboardResult = { type: "close" } | { type: "attach"; id: string };
+/** `command`: close the dashboard and run `text` (a `/command …` line) in this Pi, as if typed into its editor. */
+export type DashboardResult = { type: "close" } | { type: "attach"; id: string } | { type: "command"; text: string };

@@ -1,13 +1,13 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { CURSOR_MARKER, setKittyProtocolActive, visibleWidth } from "@earendil-works/pi-tui";
+import { CombinedAutocompleteProvider, CURSOR_MARKER, setKittyProtocolActive, visibleWidth } from "@earendil-works/pi-tui";
 import type { Row } from "../../src/state.ts";
 import type { AgentMeta, AgentStatus } from "../../src/store.ts";
 import { TmuxNotFoundError } from "../../src/tmux.ts";
 import { Dashboard } from "../../src/ui/dashboard.ts";
-import type { DashboardOptions } from "../../src/ui/dashboard.ts";
+import type { DashboardOptions, SlashCommands } from "../../src/ui/dashboard.ts";
 import type { DashboardResult, DashboardService } from "../../src/ui/service-types.ts";
-import { SPINNER_FRAMES, EMPTY_HINT, LIST_HINTS_EMPTY, PEEK_HINTS, hintsText } from "../../src/ui/view.ts";
+import { SPINNER_FRAMES, EMPTY_HINT, LIST_HINTS_EMPTY, PEEK_HINTS, SUGGESTION_HINTS, hintsText } from "../../src/ui/view.ts";
 import type { HeaderContext } from "../../src/ui/view.ts";
 
 const LIST_FOOTER = hintsText(LIST_HINTS_EMPTY);
@@ -948,5 +948,104 @@ test("focused is propagated to the input that has focus", async () => {
   assert.ok(strip(markerLine()!).includes("│ reply ❯ "));
   h.d.focused = false;
   assert.equal(markerLine(), undefined);
+  h.d.dispose();
+});
+
+// --- slash commands ---
+
+/** Pi's real command autocomplete over a small command set; `here` are the commands that run in this Pi. */
+function slashCommands(here = ["settings", "model"]): SlashCommands {
+  const provider = new CombinedAutocompleteProvider(
+    [
+      { name: "settings", description: "Open settings" },
+      {
+        name: "model",
+        description: "Select model",
+        getArgumentCompletions: (prefix: string) =>
+          ["anthropic/opus", "openai/gpt"].filter((m) => m.startsWith(prefix)).map((m) => ({ value: m, label: m })),
+      },
+      { name: "skill:review", description: "Review code" },
+    ],
+    "/repo",
+  );
+  return { autocomplete: () => provider, runsHere: async (name) => here.includes(name) };
+}
+
+/** Lines drawn between the input box and the footer. */
+function menuLines(h: Harness): string[] {
+  const ls = h.screen();
+  const inputLine = ls.findIndex((l) => l.startsWith("│ ❯ "));
+  return ls.slice(inputLine + 2, -1);
+}
+
+test("/ opens Pi's command menu under the input; ↑↓ move in the menu, not the list", async () => {
+  const h = await setup(three(), { slash: slashCommands() });
+  await typeText(h, "/");
+  assert.equal(menuLines(h).length, 3);
+  assert.match(menuLines(h)[0]!, /settings\s+Open settings/);
+  assert.equal(h.screen().at(-1), hintsText(SUGGESTION_HINTS));
+  await h.press(KEY.down);
+  assert.match(menuLines(h)[1]!, /^→ model/);
+  assert.equal(h.selected(), "Agent a");
+  await typeText(h, "sett");
+  assert.equal(menuLines(h).length, 1);
+  assert.match(menuLines(h)[0]!, /^→ settings/);
+  h.d.dispose();
+});
+
+test("Enter on a menu command that runs in Pi closes the dashboard with that command", async () => {
+  const h = await setup(three(), { slash: slashCommands() });
+  await typeText(h, "/sett");
+  await h.press(KEY.enter);
+  assert.deepEqual(h.results, [{ type: "command", text: "/settings" }]);
+  assert.equal(h.svc.count("dispatch"), 0);
+  h.d.dispose();
+});
+
+test("Tab completes command arguments; Enter then runs the whole line in Pi", async () => {
+  const h = await setup(three(), { slash: slashCommands() });
+  await typeText(h, "/model op");
+  assert.equal(menuLines(h).length, 1);
+  await h.press("\t");
+  assert.equal(inputValue(h), "/model openai/gpt");
+  assert.deepEqual(menuLines(h), []);
+  await h.press(KEY.enter);
+  assert.deepEqual(h.results, [{ type: "command", text: "/model openai/gpt" }]);
+  h.d.dispose();
+});
+
+test("Enter on a skill completes it and waits for the task; the task line goes to a new agent", async () => {
+  const h = await setup(three(), { slash: slashCommands() });
+  await typeText(h, "/rev");
+  await h.press(KEY.enter);
+  assert.equal(inputValue(h), "/skill:review"); // plus the space Pi's completion adds
+  assert.deepEqual(h.results, []);
+  assert.equal(h.svc.count("dispatch"), 0);
+  await typeText(h, "the login fix");
+  await h.press(KEY.enter);
+  assert.deepEqual(h.svc.only("dispatch"), [["dispatch", "/skill:review the login fix", "/repo/sub"]]);
+  assert.deepEqual(h.results, []);
+  h.d.dispose();
+});
+
+test("a / line that is not a Pi command is dispatched", async () => {
+  const h = await setup(three(), { slash: slashCommands() });
+  await typeText(h, "/tmp/out.log is empty, find out why");
+  await h.press(KEY.enter);
+  assert.deepEqual(h.svc.only("dispatch"), [["dispatch", "/tmp/out.log is empty, find out why", "/repo/sub"]]);
+  assert.deepEqual(h.results, []);
+  h.d.dispose();
+});
+
+test("Esc closes the menu first, then clears the input", async () => {
+  const h = await setup(three(), { slash: slashCommands() });
+  await typeText(h, "/mo");
+  assert.equal(menuLines(h).length, 1);
+  await h.press(KEY.esc);
+  assert.deepEqual(menuLines(h), []);
+  assert.equal(inputValue(h), "/mo");
+  await h.press(KEY.esc);
+  assert.ok(inputValue(h).startsWith("Dispatch a new agent"));
+  assert.deepEqual(h.results, []);
   h.d.dispose();
 });

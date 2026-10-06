@@ -2,7 +2,7 @@
 // `pi --agents`, or ← on an empty prompt, and runs the attach loop (stop TUI → tmux attach → start TUI).
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
-import type { Component, Focusable, OverlayOptions } from "@earendil-works/pi-tui";
+import type { AutocompleteProvider, Component, Focusable, OverlayOptions, TUI } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { resolveConfig } from "./config.ts";
 import { currentBranch, repoRoot } from "./git.ts";
@@ -11,7 +11,7 @@ import { resolveHome, tmuxConfPath } from "./paths.ts";
 import { AgentService } from "./service.ts";
 import { Tmux } from "./tmux.ts";
 import { Dashboard } from "./ui/dashboard.ts";
-import type { DashboardOptions } from "./ui/dashboard.ts";
+import type { DashboardOptions, SlashCommands } from "./ui/dashboard.ts";
 import type { DashboardResult, DashboardService } from "./ui/service-types.ts";
 import type { HeaderContext } from "./ui/view.ts";
 
@@ -111,6 +111,30 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+interface SubmittableEditor {
+  onSubmit?: (text: string) => unknown;
+  getText?: () => string;
+}
+
+/**
+ * Runs `text` the way Pi runs a line submitted from its editor: Pi's submit handler is the only entry point
+ * for built-in commands (`/model`, `/settings`, …), so call it on the editor, which has focus again once the
+ * dashboard overlay is gone. Without one, leave the line in the editor for the user to submit.
+ */
+export function submitToEditor(ctx: ExtensionContext, tui: TUI, text: string): void {
+  // Pi's TUI (TuiBase) has getFocusedComponent(); the TUI interface it hands to extensions does not declare it.
+  const focused = (tui as { getFocusedComponent?: () => unknown }).getFocusedComponent?.();
+  const editor = (focused ?? null) as SubmittableEditor | null;
+  if (typeof editor?.onSubmit === "function" && typeof editor.getText === "function") {
+    Promise.resolve()
+      .then(() => editor.onSubmit!(text))
+      .catch((err: unknown) => ctx.ui.notify(`${text} failed: ${errorMessage(err)}`, "error"));
+    return;
+  }
+  ctx.ui.setEditorText(text);
+  ctx.ui.notify(`Press Enter to run ${text}`, "info");
+}
+
 export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps = {}): void {
   const createDashboard = deps.createDashboard ?? ((opts: DashboardOptions) => new Dashboard(opts));
   let wiring: { service: DashboardService; tmux: Tmux } | undefined;
@@ -119,7 +143,21 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
   let unsubscribeInput: (() => void) | undefined;
   let model: ModelChoice | null = null; // captured when the dashboard opens; read by every dispatch
   let namer: Namer | null = null; // built when the dashboard opens; read by every dispatch
+  let editorAutocomplete: AutocompleteProvider | null = null; // Pi's editor autocomplete, captured on session_start
   const reportedNamingProblems = new Set<string>();
+
+  const slash: SlashCommands = {
+    autocomplete: () => editorAutocomplete,
+    async runsHere(name) {
+      // Prompt templates and skills expand into a prompt, so they belong to the new agent.
+      const registered = pi.getCommands().find((c) => c.name === name);
+      if (registered) return registered.source === "extension";
+      // Built-in commands are not in getCommands(); Pi's editor lists them with everything else.
+      if (editorAutocomplete === null) return false;
+      const all = await editorAutocomplete.getSuggestions(["/"], 0, 1, { signal: new AbortController().signal });
+      return all?.items.some((item) => item.value === name) ?? false;
+    },
+  };
 
   /** Built on first open, so loading the extension never touches the store or tmux. */
   function getWiring(): { service: DashboardService; tmux: Tmux } {
@@ -179,8 +217,11 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
     return { cwd: displayPath(ctx.cwd), branch, inRepo, modelLabel: modelLabel(model) };
   }
 
-  async function runDashboard(ctx: ExtensionContext): Promise<void> {
+  /** Shows the dashboard until it closes; returns the `/command` line to run, if that is how it closed. */
+  async function runDashboard(ctx: ExtensionContext): Promise<{ text: string; tui: TUI } | undefined> {
     const { service, tmux } = getWiring();
+    const maxVisible = pi.getSettings().autocompleteMaxVisible;
+    let screen: TUI | undefined;
     model = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id, thinking: pi.getThinkingLevel() } : null;
     setupNaming(ctx);
     const context = await headerContext(ctx);
@@ -189,6 +230,7 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
       const initialSelectedId = selected;
       const result = await ctx.ui.custom<DashboardResult>(
         (tui, theme, _kb, done) => {
+          screen = tui;
           const height = () => tui.terminal.rows;
           const dashboard = createDashboard({
             service,
@@ -199,12 +241,15 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
             requestRender: () => tui.requestRender(),
             height,
             initialSelectedId,
+            slash,
+            autocompleteMaxVisible: maxVisible,
           });
           return new FullScreen(dashboard, height);
         },
         { overlay: true, overlayOptions: DASHBOARD_OVERLAY_OPTIONS },
       );
-      if (result.type === "close") return;
+      if (result.type === "close") return undefined;
+      if (result.type === "command") return screen ? { text: result.text, tui: screen } : undefined;
       selected = result.id;
       await attach(ctx, tmux, result.id);
     }
@@ -218,13 +263,26 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
     }
     if (open) return;
     open = true;
+    let command: { text: string; tui: TUI } | undefined;
     try {
-      await runDashboard(ctx);
+      command = await runDashboard(ctx);
     } catch (err) {
       ctx.ui.notify(`Agent dashboard failed: ${errorMessage(err)}`, "error");
     } finally {
       open = false;
     }
+    // After `open` is cleared, so `/agents` (or ← on an empty prompt afterwards) can reopen the dashboard.
+    if (command) submitToEditor(ctx, command.tui, command.text);
+  }
+
+  /** Keeps the autocomplete Pi's editor uses, for the dashboard's `/` menu, without changing it. */
+  function captureEditorAutocomplete(ctx: ExtensionContext): void {
+    editorAutocomplete = null;
+    if (!ctx.hasUI || ctx.mode !== "tui") return;
+    ctx.ui.addAutocompleteProvider((current) => {
+      editorAutocomplete = current;
+      return current;
+    });
   }
 
   function subscribeOpenKey(ctx: ExtensionContext): void {
@@ -248,6 +306,7 @@ export function registerDashboardRole(pi: ExtensionAPI, deps: DashboardRoleDeps 
 
   pi.on("session_start", (event, ctx) => {
     subscribeOpenKey(ctx);
+    captureEditorAutocomplete(ctx);
     // Only the initial startup: /new, /resume, or /reload keep the user where they are.
     if (event.reason === "startup" && pi.getFlag("agents") === true && ctx.mode === "tui") {
       void openDashboard(ctx); // not awaited: startup must not wait for the dashboard to close

@@ -6,7 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { CombinedAutocompleteProvider, visibleWidth } from "@earendil-works/pi-tui";
+import type { AutocompleteProvider } from "@earendil-works/pi-tui";
 import { AgentService } from "../src/service.ts";
 import { Tmux } from "../src/tmux.ts";
 import type { DashboardService, DashboardResult } from "../src/ui/service-types.ts";
@@ -34,7 +35,11 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 type InputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
 type CommandHandler = (args: string, ctx: unknown) => Promise<void>;
 
-function fakePi(flags: Record<string, boolean | string | undefined> = {}, settings: unknown = {}) {
+function fakePi(
+  flags: Record<string, boolean | string | undefined> = {},
+  settings: unknown = {},
+  slashCommands: { name: string; source: "extension" | "prompt" | "skill" }[] = [],
+) {
   const handlers = new Map<string, Handler[]>();
   const commands = new Map<string, { description?: string; handler: CommandHandler }>();
   const registeredFlags = new Map<string, unknown>();
@@ -54,6 +59,7 @@ function fakePi(flags: Record<string, boolean | string | undefined> = {}, settin
     },
     getThinkingLevel: () => "high",
     getSettings: () => settings,
+    getCommands: () => slashCommands,
   };
   async function emit(type: string, event: Record<string, unknown>, ctx: unknown): Promise<void> {
     for (const h of handlers.get(type) ?? []) await h({ type, ...event }, ctx);
@@ -82,6 +88,9 @@ function fakeCtx(
     unsubscribed: 0,
     notes: [] as [string, unknown][],
     customCalls: [] as CustomCall[],
+    autocompleteFactories: [] as ((current: AutocompleteProvider) => AutocompleteProvider)[],
+    /** What `tui.getFocusedComponent()` returns: Pi's editor once the dashboard overlay is gone. */
+    focused: null as unknown,
   };
   const tui = {
     terminal: {
@@ -94,6 +103,7 @@ function fakeCtx(
     stop: () => log.push("stop"),
     start: () => log.push("start"),
     requestRender: (force?: boolean) => log.push(force ? "render:force" : "render"),
+    getFocusedComponent: () => state.focused,
   };
   const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
   const ctx = {
@@ -110,6 +120,9 @@ function fakeCtx(
     },
     ui: {
       getEditorText: () => state.editorText,
+      setEditorText: (text: string) => void (state.editorText = text),
+      addAutocompleteProvider: (factory: (current: AutocompleteProvider) => AutocompleteProvider) =>
+        void state.autocompleteFactories.push(factory),
       notify: (message: string, type?: unknown) => state.notes.push([message, type]),
       onTerminalInput(handler: InputHandler) {
         state.inputHandlers.push(handler);
@@ -258,6 +271,72 @@ test('naming "off" is silent', async () => {
   registerDashboardRole(pi, { ...deps, env: {} });
   await commands.get("agents")!.handler("", ctx);
   assert.deepEqual(state.notes, []);
+});
+
+// --- slash commands ---
+
+test("a /command result closes the dashboard and submits the line to Pi's editor", async () => {
+  const { pi, commands } = fakePi();
+  const { ctx, log, state } = fakeCtx({ results: [{ type: "command", text: "/model openai/gpt" }] });
+  const submitted: string[] = [];
+  state.focused = { getText: () => "", onSubmit: (text: string) => void submitted.push(text) };
+  const { deps } = fakeDeps(log);
+  registerDashboardRole(pi, deps);
+  await commands.get("agents")!.handler("", ctx);
+  await settle();
+  assert.deepEqual(submitted, ["/model openai/gpt"]);
+  assert.deepEqual(log, ["custom:dashboard"]); // no attach, not reopened
+  assert.deepEqual(state.notes, []);
+});
+
+test("a /command can reopen the dashboard: it runs after the dashboard has fully closed", async () => {
+  const { pi, commands } = fakePi();
+  const { ctx, log, state } = fakeCtx({ results: [{ type: "command", text: "/agents" }, { type: "close" }] });
+  state.focused = { getText: () => "", onSubmit: (text: string) => void commands.get(text.slice(1))!.handler("", ctx) };
+  const { deps, created } = fakeDeps(log);
+  registerDashboardRole(pi, deps);
+  await commands.get("agents")!.handler("", ctx);
+  await settle();
+  assert.equal(created.length, 2);
+});
+
+test("without a focused editor the /command is left in the editor to submit", async () => {
+  const { pi, commands } = fakePi();
+  const { ctx, log, state } = fakeCtx({ results: [{ type: "command", text: "/settings" }] });
+  const { deps } = fakeDeps(log);
+  registerDashboardRole(pi, deps);
+  await commands.get("agents")!.handler("", ctx);
+  assert.equal(state.editorText, "/settings");
+  assert.deepEqual(state.notes, [["Press Enter to run /settings", "info"]]);
+});
+
+test("the dashboard gets Pi's editor autocomplete; built-in and extension commands run here, prompts go to agents", async () => {
+  const { pi, commands, emit } = fakePi({}, {}, [
+    { name: "agents", source: "extension" },
+    { name: "skill:review", source: "skill" },
+    { name: "fix-tests", source: "prompt" },
+  ]);
+  const { ctx, log, state } = fakeCtx();
+  const { deps, created } = fakeDeps(log);
+  registerDashboardRole(pi, deps);
+  await emit("session_start", { reason: "startup" }, ctx);
+  // Pi builds its editor autocomplete from built-in and registered commands, then runs the wrappers.
+  const editorProvider = new CombinedAutocompleteProvider(
+    ["settings", "model", "agents", "skill:review", "fix-tests"].map((name) => ({ name })),
+    "/launch/dir",
+  );
+  assert.equal(state.autocompleteFactories.length, 1);
+  assert.equal(state.autocompleteFactories[0]!(editorProvider), editorProvider); // Pi's own menu is unchanged
+  void commands.get("agents")!.handler("", ctx);
+  await settle();
+  const slash = created[0]!.slash!;
+  assert.equal(slash.autocomplete(), editorProvider);
+  assert.equal(await slash.runsHere("settings"), true);
+  assert.equal(await slash.runsHere("agents"), true);
+  assert.equal(await slash.runsHere("skill:review"), false);
+  assert.equal(await slash.runsHere("fix-tests"), false);
+  assert.equal(await slash.runsHere("tmp"), false);
+  state.customCalls[0]!.done({ type: "close" });
 });
 
 test("displayPath, modelLabel and modelArgs", () => {
